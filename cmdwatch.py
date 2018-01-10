@@ -1,5 +1,17 @@
 #! /usr/bin/env python
 
+'''
+TODO:
+   - Write docs
+   - Monitor periodic command output (as opposed to continually running/constant output commands)
+   - Add tests
+   - Integer differences: Total since last sample, average over change time, etc
+   - Interactive control
+   - Version tracking
+   - Other field transforms
+   - Better field substitution primatives
+'''
+
 import os, sys, os.path, subprocess, time, itertools, argparse, string
 
 class spin(object):
