@@ -10,6 +10,7 @@ TODO:
    - Version tracking
    - Other field transforms
    - Better field substitution primatives
+   - Store command/args for reuse/config file
 '''
 
 import os, sys, os.path, subprocess, time, itertools, argparse, string
@@ -82,8 +83,7 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
     history = {}
     cmds = {}
     keyhandler = Key(key)
-    '''172.100.1.15 /dev/vdb1       83844100 43976  83800124   1% /var/lib/ceph
-    '''
+
     for l in iter(proc.stdout.readline, b''):
         spinner.spin()
         if l.startswith('#') and not comments:
