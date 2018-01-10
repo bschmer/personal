@@ -90,7 +90,7 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
             continue
         ctime = time.time()
         ld = l.strip().split(None, maxsplit)
-        k = keyhandler.handle(*ld)
+        curkey = keyhandler.handle(*ld)
 
         if resolvepid and len(ld) > resolvepid:
             pid = ld[resolvepid]
@@ -118,13 +118,13 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
 
         if tstamp is not None  and len(ld) > tstamp:
             ld.pop(tstamp)
-        if not k in running:
-            running.append(k)
-        if k not in history:
-            history[k] = [''] * 8  # The number doesn't really matter....could be len(ld)
-        if ld != history[k]:
-            spinner.output(' '.join(map(lambda x: showdiff(*x), zip(history[k], ld))))
-            history[k] = ld
+        if not curkey in running:
+            running.append(curkey)
+        if curkey not in history:
+            history[curkey] = [''] * 8  # The number doesn't really matter....could be len(ld)
+        if ld != history[curkey]:
+            spinner.output(' '.join(map(lambda x: showdiff(*x), zip(history[curkey], ld))))
+            history[curkey] = ld
 
 
 if __name__ == '__main__':
