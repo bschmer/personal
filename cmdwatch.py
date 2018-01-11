@@ -3,7 +3,6 @@
 '''
 TODO:
    - Write docs
-   - Monitor periodic command output (as opposed to continually running/constant output commands)
    - Add tests
    - Integer differences: Total since last sample, average over change time, etc
    - Interactive control
@@ -74,8 +73,28 @@ class Key(object):
         d = dict(map(lambda x: ('p%s' % x[0], x[1]), enumerate(args)))
         return self._key.substitute(d)
 
+def genout(cmd, sleeptime = 1):
+    ltime = time.time()
+    ctime = ltime - sleeptime
+    timehist = []
+    while True:
+        if len(timehist) > 0:
+            timehist.append(sleeptime - (ltime - ctime))
+        else:
+            timehist.append(0)
+        if len(timehist) > 10:
+            timehist.pop(0)
+        ctime = time.time()
+        avg = sum(timehist)/len(timehist)
+        deadline = ctime + sleeptime + avg
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        for l in iter(proc.stdout.readline, b''):
+            yield l
+        time.sleep(deadline - time.time())
+        ltime = time.time()
+
 def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000, pidreplace=None):
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     spinner = spin()
     timestamp = ''
@@ -84,7 +103,7 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
     cmds = {}
     keyhandler = Key(key)
 
-    for l in iter(proc.stdout.readline, b''):
+    for l in genout(cmd):
         spinner.spin()
         if l.startswith('#') and not comments:
             continue
@@ -111,12 +130,12 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
             
         if tstamp is not None and ld[tstamp] != timestamp:
             timestamp = ld[tstamp]
-            # Clean up any stragglers                                                                                                                                                                                                                                                  
+            # Clean up any stragglers
             for k in history.keys():
                 if k not in running:
                     history.pop(k)
 
-        if tstamp is not None  and len(ld) > tstamp:
+        if tstamp is not None and len(ld) > tstamp:
             ld.pop(tstamp)
         if not curkey in running:
             running.append(curkey)
