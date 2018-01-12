@@ -10,6 +10,10 @@ TODO:
    - Other field transforms
    - Better field substitution primatives
    - Store command/args for reuse/config file
+   - Alert triggering: threshold, value over time, average over time, etc
+   - Server mode
+   - Header saving/hiding
+   - "Keyless" input, i.e. iostat output
 '''
 
 import os, sys, os.path, subprocess, time, itertools, argparse, string
