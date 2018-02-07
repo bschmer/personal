@@ -16,7 +16,14 @@ TODO:
    - "Keyless" input, i.e. iostat output
 '''
 
-import os, sys, os.path, subprocess, time, itertools, argparse, string
+import os
+import sys
+import os.path
+import subprocess
+import time
+import itertools
+import argparse
+import string
 
 class spin(object):
     def __init__(self, spinchars='|/-\\', *args, **kwds):
@@ -74,7 +81,7 @@ class Key(object):
         self._key = string.Template(key)
 
     def handle(self, *args, **kwds):
-        d = dict(map(lambda x: ('p%s' % x[0], x[1]), enumerate(args)))
+        d = dict([('p%s' % x[0], x[1]) for x in  enumerate(args)])
         return self._key.substitute(d)
 
 def genout(cmd, sleeptime = 1):
@@ -111,7 +118,6 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
         spinner.spin()
         if l.startswith('#') and not comments:
             continue
-        ctime = time.time()
         ld = l.strip().split(None, maxsplit)
         curkey = keyhandler.handle(*ld)
 
@@ -131,7 +137,7 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
                 if pidreplace and len(ld) > pidreplace:
                     loc = pidreplace
                 ld[loc] = cmd
-            
+
         if tstamp is not None and ld[tstamp] != timestamp:
             timestamp = ld[tstamp]
             # Clean up any stragglers
@@ -146,7 +152,7 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
         if curkey not in history:
             history[curkey] = [''] * 8  # The number doesn't really matter....could be len(ld)
         if ld != history[curkey]:
-            spinner.output(' '.join(map(lambda x: showdiff(*x), zip(history[curkey], ld))))
+            spinner.output(' '.join([showdiff(*x) for x in zip(history[curkey], ld)]))
             history[curkey] = ld
 
 
