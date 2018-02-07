@@ -34,7 +34,6 @@ def genlist(path, q):
     q.put(pathinfo(-1, None, None))
 
 def handle(ip, q, cmd, src, dest, index=0):
-    basecmd = cmd
     dircmd = list(cmd)
     dircmd.append("--no-recursive")
     dircmd.append("--dirs")
@@ -45,7 +44,7 @@ def handle(ip, q, cmd, src, dest, index=0):
         item = q.get()
         if not item.name:
             break
-        
+
         if item.size == dirtrigger:
             fullcmd = dircmd + ['%s%s/' % (src, item.path), '%s%s/' % (dest, item.path)]
         else:
@@ -69,23 +68,16 @@ gt.start()
 ipt = []
 for index, ip in enumerate(ips):
     ipt.append(threading.Thread(target = handle, args=(ip, q, cmd, src, dest, index)))
-map(lambda x: x.start(), ipt)
+
+for x in ipt:
+    x.start()
 
 print gt
-'''
-handle('ip', q, cmd, src, dest, 1.5)
-while True:
-    item = q.get()
-    handle('ip', q
-    if not item.name:
-        for i in range(len(ipt)):
-            q.put(item)
-        break
-'''
 
 gt.join()
 
 for i in range(len(ipt)):
     q.put(pathinfo(-1, None, None))
-map(lambda x: x.join(), ipt)
+for x in ipt:
+    x.join()
 
