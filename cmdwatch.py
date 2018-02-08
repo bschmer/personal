@@ -24,6 +24,7 @@ import time
 import itertools
 import argparse
 import string
+import select
 
 def _output(msg, delta=None, ctime=None, term='\n'):
     if term is None:
@@ -85,26 +86,34 @@ class Key(object):
         d = dict([('p%s' % x[0], x[1]) for x in  enumerate(args)])
         return self._key.substitute(d)
 
-def genout(cmd, sleeptime = 1):
-    ltime = time.time()
-    ctime = ltime - sleeptime
-    timehist = []
-    while True:
-        if len(timehist) > 0:
-            timehist.append(sleeptime - (ltime - ctime))
-        else:
-            timehist.append(0)
-        if len(timehist) > 10:
-            timehist.pop(0)
-        ctime = time.time()
-        avg = sum(timehist)/len(timehist)
-        deadline = ctime + sleeptime + avg
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+class genout(object):
+    def __init__(self, cmd, sleeptime=1):
+        self._cmd = cmd
+        self._sleeptime = sleeptime
 
-        for l in iter(proc.stdout.readline, b''):
-            yield l
-        time.sleep(deadline - time.time())
+    def __iter__(self):
         ltime = time.time()
+        ctime = ltime - self._sleeptime
+        timehist = []
+        while True:
+            if len(timehist) > 0:
+                timehist.append(self._sleeptime - (ltime - ctime))
+            else:
+                timehist.append(0)
+            if len(timehist) > 10:
+                timehist.pop(0)
+            ctime = time.time()
+            avg = sum(timehist)/len(timehist)
+            deadline = ctime + self._sleeptime + avg
+            proc = subprocess.Popen(self._cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            for l in iter(proc.stdout.readline, b''):
+                yield l
+            time.sleep(deadline - time.time())
+            ltime = time.time()
+
+    def sleeptime(self, sleeptime):
+        self._sleeptime = sleeptime
 
 def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000, pidreplace=None, sleeptime=1, iterations=0):
 
@@ -115,7 +124,28 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
     cmds = {}
     keyhandler = Key(key)
 
-    for index, l in enumerate(genout(cmd, sleeptime=sleeptime)):
+    outgen = genout(cmd, sleeptime=sleeptime)
+    for index, l in enumerate(outgen):
+        r, w, e = select.select([sys.stdin], [], [], .01)
+        if r:
+            cmd = sys.stdin.readline().strip().lower()
+            if cmd.startswith('q'):
+                # Exit app
+                break
+            elif cmd.startswith('s'):
+                parts = cmd.split()
+                try:
+                    outgen.sleeptime(int(parts[1]))
+                except Exception, e:
+                    print 
+            elif cmd.startswith('i'):
+                parts = cmd.split()
+                try:
+                    iterations = int(parts[1])
+                except Exception, e:
+                    print 
+            else:
+                print 'Unknown command: %s' % cmd
         if iterations and index > iterations:
             break
         spinner.spin()
