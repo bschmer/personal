@@ -106,7 +106,7 @@ def genout(cmd, sleeptime = 1):
         time.sleep(deadline - time.time())
         ltime = time.time()
 
-def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000, pidreplace=None, sleeptime=1):
+def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000, pidreplace=None, sleeptime=1, iterations=0):
 
     spinner = spin()
     timestamp = ''
@@ -115,7 +115,9 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
     cmds = {}
     keyhandler = Key(key)
 
-    for l in genout(cmd, sleeptime=sleeptime):
+    for index, l in enumerate(genout(cmd, sleeptime=sleeptime)):
+        if iterations and index > iterations:
+            break
         spinner.spin()
         if l.startswith('#') and not comments:
             continue
@@ -164,6 +166,7 @@ if __name__ == '__main__':
     parser.add_argument('-r', action='store', dest='pidreplace', default=None)
     parser.add_argument('-t', action='store', dest='tstamp', default=None)
     parser.add_argument('-i', action='store', dest='interval', type=int, default=1)
+    parser.add_argument('-I', action='store', dest='iterations', type=int, default=0)
     parser.add_argument('-c', action='store_true', dest='comments', default=False)
     parser.add_argument('rest', nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -175,5 +178,5 @@ if __name__ == '__main__':
         args.pidreplace = int(args.pidreplace)
     if args.tstamp:
         args.tstamp = int(args.tstamp)
-    watch(args.rest, args.key, comments=args.comments, resolvepid=args.pid, tstamp=args.tstamp, pidreplace=args.pidreplace, sleeptime=args.interval)
+    watch(args.rest, args.key, comments=args.comments, resolvepid=args.pid, tstamp=args.tstamp, pidreplace=args.pidreplace, sleeptime=args.interval, iterations=args.iterations)
 
