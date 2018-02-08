@@ -58,7 +58,7 @@ def handle(ip, q, cmd, src, dest, index=0):
             #time.sleep(0.02)
 
         q.task_done()
-    
+
 
 q = Queue.PriorityQueue(24*1024)
 print q

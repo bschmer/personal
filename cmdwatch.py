@@ -25,6 +25,29 @@ import itertools
 import argparse
 import string
 
+def _output(self, msg, delta=None, ctime=None, term='\n'):
+    if term is None:
+        term = ''
+    output = ''
+    if ctime is not None:
+        output += time.ctime(ctime)
+    if delta is not None:
+        output += '(%.2f)' % delta
+
+    if output:
+        output += ' '
+    if msg:
+        output += msg
+    start = ''
+    if term:
+        if '\r' in term:
+            start = ' '
+        output += term
+
+    sys.stdout.write(start + output)
+    sys.stdout.flush()
+
+
 class spin(object):
     def __init__(self, spinchars='|/-\\', *args, **kwds):
         self._chars = itertools.cycle(spinchars)
@@ -36,34 +59,12 @@ class spin(object):
         ctime = time.time()
         if self._lastspin + self._mincycle > ctime:
             return
-        self._output(next(self._chars), delta=ctime-self._lastout, term='\r')
+        _output(next(self._chars), delta=ctime-self._lastout, term='\r')
         self._lastspin = ctime
-
-    def _output(self, msg, delta=None, ctime=None, term='\n'):
-        if term is None:
-            term = ''
-        output = ''
-        if ctime is not None:
-            output += time.ctime(ctime)
-        if delta is not None:
-            output += '(%.2f)' % delta
-
-        if output:
-            output += ' '
-        if msg:
-            output += msg
-        start = ''
-        if term:
-            if '\r' in term:
-                start = ' '
-            output += term
-
-        sys.stdout.write(start + output)
-        sys.stdout.flush()
 
     def output(self, msg, *args, **kwds):
         ctime = time.time()
-        self._output(msg, ctime = ctime, delta = ctime - self._lastout, *args, **kwds)
+        _output(msg, ctime = ctime, delta = ctime - self._lastout, *args, **kwds)
         self._lastout = ctime
 
 
