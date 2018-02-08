@@ -27,8 +27,6 @@ import string
 import select
 
 def _output(msg, delta=None, ctime=None, term='\n'):
-    if term is None:
-        term = ''
     output = ''
     if ctime is not None:
         output += time.ctime(ctime)
