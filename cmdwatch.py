@@ -126,7 +126,7 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
 
     outgen = genout(cmd, sleeptime=sleeptime)
     for index, l in enumerate(outgen):
-        r, w, e = select.select([sys.stdin], [], [], .01)
+        r = select.select([sys.stdin], [], [], .01)[0]
         if r:
             cmd = sys.stdin.readline().strip().lower()
             if cmd.startswith('q'):
@@ -137,13 +137,13 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None, maxsplit=10000
                 try:
                     outgen.sleeptime(int(parts[1]))
                 except Exception, e:
-                    print 
+                    print str(e)
             elif cmd.startswith('i'):
                 parts = cmd.split()
                 try:
                     iterations = int(parts[1])
                 except Exception, e:
-                    print 
+                    print str(e)
             else:
                 print 'Unknown command: %s' % cmd
         if iterations and index > iterations:
