@@ -25,7 +25,7 @@ import itertools
 import argparse
 import string
 
-def _output(self, msg, delta=None, ctime=None, term='\n'):
+def _output(msg, delta=None, ctime=None, term='\n'):
     if term is None:
         term = ''
     output = ''
