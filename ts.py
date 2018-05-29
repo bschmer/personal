@@ -56,6 +56,7 @@ class Stamper(object):
         self._dtime = self._ctime - self._ltime
 
     def run(self, verbose=False, *args, **kwds):
+        rv = 0
         while self._inhandles:
             if verbose:
                 print(self._inhandles, self._procs, self._outhandles)
@@ -74,6 +75,11 @@ class Stamper(object):
                     if d == '':
                         self._inhandles.pop(fh)
                         if fproc in self._procs:
+                            if not fproc.returncode:
+                                # We got the signal that the child should exit, but it doesn't 
+                                # have a return code.  Wait for the child and set our return code
+                                fproc.wait()
+                            rv |= fproc.returncode
                             self._procs.remove(fproc)
                         if len(self._procs) == 0 and [x for x in self._inhandles.keys()] == [sys.stdin.fileno()]:
                             self._inhandles.pop(sys.stdin.fileno())
@@ -81,8 +87,11 @@ class Stamper(object):
                     self._handle(d, fproc=fproc, fdesc=fdesc, verbose=verbose, update=False)
                 self._ltime = self._ctime
 
+        return rv
+
         
 if __name__ == '__main__':
     cmd = ' '.join(sys.argv[1:])
-    stamper = Stamper(cmd=cmd, logfile=os.path.join(os.path.expanduser('~'), 'logs', '%s_%d' % (cmd.replace(' ', '_').replace(os.path.sep, '_'), time.time())))
-    stamper.run(False)
+    stamper = Stamper(cmd=cmd)
+    rv = stamper.run(False)
+    sys.exit(rv)
