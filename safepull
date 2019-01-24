@@ -28,6 +28,7 @@ then
     jfrog rt ping >/dev/null
     if [ $? -ne 0 ]
     then
+	echo "Unable to log into jfrog.  Aborting pull"
 	exit 1
     fi
     
