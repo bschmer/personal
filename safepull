@@ -1,0 +1,36 @@
+#! /usr/bin/env bash
+
+urldecode() { : "${*//+/ }"; echo -e "${_//%/\\x}"; }
+
+export PATH="$PATH:/tmp"
+
+command jfrog >/dev/null 2&>1
+if [ $? -eq 127 ]
+then
+    pushd /tmp
+    echo "jfrog command not found, fetching"
+    curl -fL https://getcli.jfrog.io | sh
+    popd
+fi
+
+BNRJFROG="bossanova.jfrog.io"
+BNRURL="https://${BNRJFROG}/bossanova"
+# TODO: Make this more generic
+lfsurl=$(git config --list --local | grep lfs 2>/dev/null | grep ${BNRURL})
+if [ $? -eq 0 ]
+then
+    userpass=$(urldecode $(grep ${BNRJFROG} ~/.git-credentials | sed -e "s|https://||" -e "s|@${BNRJFROG}||"))
+
+    echo y | jfrog rt config delete bossanova >/dev/null 2>&1
+    
+    jfrog rt config --url $BNRURL --user $(echo $userpass | awk -F: '{print $1}') --password $(echo $userpass | awk -F: '{print $2}') bossanova >/dev/null 2>&1
+
+    jfrog rt ping >/dev/null
+    if [ $? -ne 0 ]
+    then
+	exit 1
+    fi
+    
+fi
+
+git pull
