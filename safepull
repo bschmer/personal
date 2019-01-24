@@ -15,21 +15,26 @@ fi
 
 BNRJFROG="bossanova.jfrog.io"
 BNRURL="https://${BNRJFROG}/bossanova"
+JFROGCONFIG="~/.jfrog/jfrog-cli.conf"
+GITCREDS="~/.git-credentials"
 # TODO: Make this more generic
 lfsurl=$(git config --list --local | grep lfs 2>/dev/null | grep ${BNRURL})
 if [ $? -eq 0 ]
 then
-    userpass=$(urldecode $(grep ${BNRJFROG} ~/.git-credentials | sed -e "s|https://||" -e "s|@${BNRJFROG}||"))
-
-    echo y | jfrog rt config delete bossanova >/dev/null 2>&1
-    
-    jfrog rt config --interactive=false --url $BNRURL --user $(echo $userpass | awk -F: '{print $1}') --password $(echo $userpass | awk -F: '{print $2}') bossanova >/dev/null 2>&1
-    if [ $? -ne 0 ]
+    if [ \( ! -f ~/.jfrog/jfrog-cli.conf \) -o \( ${GITCREDS} -nt ${JFROGCONFIG} \) ]
     then
-	echo "Unable to log into jfrog.  Aborting pull"
-	exit 1
+	userpass=$(urldecode $(grep ${BNRJFROG} ~/.git-credentials | sed -e "s|https://||" -e "s|@${BNRJFROG}||"))
+
+	echo y | jfrog rt config delete bossanova >/dev/null 2>&1
+    
+	jfrog rt config --interactive=false --url $BNRURL --user $(echo $userpass | awk -F: '{print $1}') --password $(echo $userpass | awk -F: '{print $2}') bossanova >/dev/null 2>&1
+	if [ $? -ne 0 ]
+	then
+	    echo "Unable to log into jfrog.  Aborting pull"
+	    exit 1
+	fi
     fi
-    jfrog rt ping >/dev/null
+    jfrog rt ping --server-id=bossanova >/dev/null
     if [ $? -ne 0 ]
     then
 	echo "Unable to log into jfrog.  Aborting pull"
