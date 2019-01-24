@@ -23,8 +23,12 @@ then
 
     echo y | jfrog rt config delete bossanova >/dev/null 2>&1
     
-    jfrog rt config --url $BNRURL --user $(echo $userpass | awk -F: '{print $1}') --password $(echo $userpass | awk -F: '{print $2}') bossanova >/dev/null 2>&1
-
+    jfrog rt config --interactive=false --url $BNRURL --user $(echo $userpass | awk -F: '{print $1}') --password $(echo $userpass | awk -F: '{print $2}') bossanova >/dev/null 2>&1
+    if [ $? -ne 0 ]
+    then
+	echo "Unable to log into jfrog.  Aborting pull"
+	exit 1
+    fi
     jfrog rt ping >/dev/null
     if [ $? -ne 0 ]
     then
