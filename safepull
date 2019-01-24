@@ -15,13 +15,13 @@ fi
 
 BNRJFROG="bossanova.jfrog.io"
 BNRURL="https://${BNRJFROG}/bossanova"
-JFROGCONFIG="~/.jfrog/jfrog-cli.conf"
-GITCREDS="~/.git-credentials"
+JFROGCONFIG="${HOME}/.jfrog/jfrog-cli.conf"
+GITCREDS="${HOME}/.git-credentials"
 # TODO: Make this more generic
 lfsurl=$(git config --list --local | grep lfs 2>/dev/null | grep ${BNRURL})
 if [ $? -eq 0 ]
 then
-    if [ \( ! -f ~/.jfrog/jfrog-cli.conf \) -o \( ${GITCREDS} -nt ${JFROGCONFIG} \) ]
+    if [ \( ! -f ${JFROGCONFIG} \) -o \( ${GITCREDS} -nt ${JFROGCONFIG} \) ]
     then
 	userpass=$(urldecode $(grep ${BNRJFROG} ~/.git-credentials | sed -e "s|https://||" -e "s|@${BNRJFROG}||"))
 
