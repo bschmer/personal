@@ -1,20 +1,31 @@
 #! /usr/bin/env python3
+'''
+Small class to prepend timestamps to lines output by a command.
+Typical usage is:
+<command> | ts.py
+'''
 
 import os
-import sys
 import os.path
+import sys
 import subprocess
-import time
 import datetime
 import select
-import pdb
 
 class Stamper(object):
-    def __init__(self, cmd=None, logfile=None, *args, **kwds):
+    '''
+    The class that does all the work.
+    '''
+    def __init__(self, cmd=None, logfile=None):
+        '''
+        Initialize the class
+        '''
         self._inhandles = {sys.stdin.fileno(): (sys.stdin, None, 'stdin')}
         self._outhandles = {sys.stdout.fileno(): (sys.stdout, None, 'stdout')}
         self._procs = []
         self._ltime = datetime.datetime.now()
+        self._ctime = datetime.datetime.now()
+        self._dtime = self._ctime - self._ltime
 
         self._handle('Called as: %s\n' % ' '.join(sys.argv))
 
@@ -23,8 +34,11 @@ class Stamper(object):
         if logfile:
             self.addout(logfile)
 
-    def add(self, cmd, *args, **kwds):
-        if len(cmd) == 0:
+    def add(self, cmd):
+        '''
+        Add another command in the background.
+        '''
+        if not cmd:
             return
         proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self._handle('Started: \'%s\' as pid %d\n' % (cmd, proc.pid))
@@ -32,15 +46,21 @@ class Stamper(object):
         self._inhandles[proc.stdout.fileno()] = (proc.stdout, proc, 'stdout')
         self._procs.append(proc)
 
-    def addout(self, filename, *args, **kwds):
+    def addout(self, filename):
+        '''
+        Add an output sink.
+        '''
         outfile = open(filename, 'w')
         self._outhandles[outfile.fileno()] = (outfile, None, filename)
         self._handle('Logging output to %s\n' % os.path.abspath(filename))
 
-    def _handle(self, msg, fproc=None, fdesc='control', verbose=False, update=True, *args, **kwds):
+    def _handle(self, msg, fproc=None, fdesc='control', verbose=False, update=True):
+        '''
+        Handle input, sending it to the appropriate sinks.
+        '''
         if update:
             self._update()
-        for k in self._outhandles.keys():
+        for k in self._outhandles:
             ohandle, oproc, odesc = self._outhandles[k]
             if verbose:
                 print (ohandle, oproc, odesc)
@@ -48,50 +68,66 @@ class Stamper(object):
                 cpid = fproc.pid
             else:
                 cpid = os.getpid()
-            ohandle.write('%s(%03d.%06d)[%s.%s] - %s' % (self._ctime.isoformat(), self._dtime.seconds, self._dtime.microseconds, cpid, fdesc, msg))
+            ohandle.write('%s(%03d.%06d)[%s.%s] - %s' % (
+                self._ctime.isoformat(),
+                self._dtime.seconds,
+                self._dtime.microseconds,
+                cpid,
+                fdesc,
+                msg))
             ohandle.flush()
 
-    def _update(self, *args, **kwds):
+    def _update(self):
+        '''
+        Update the times.
+        '''
         self._ctime = datetime.datetime.now()
         self._dtime = self._ctime - self._ltime
 
-    def run(self, verbose=False, *args, **kwds):
-        rv = 0
+    def _cleanup(self, filedesc, fproc):
+        '''
+        Clean up a process
+        '''
+        retval = 0
+        self._inhandles.pop(filedesc)
+        if fproc in self._procs:
+            if not fproc.returncode:
+                # We got the signal that the child should exit, but it doesn't
+                # have a return code.  Wait for the child and set our return code
+                fproc.wait()
+            retval = fproc.returncode
+            self._procs.remove(fproc)
+        if not self._procs and self._inhandles.keys() == [sys.stdin.fileno()]:
+            self._inhandles.pop(sys.stdin.fileno())
+        return retval
+
+    def run(self, verbose=False):
+        '''
+        Run the commands and handle the output.
+        '''
+        retval = 0
         while self._inhandles:
             if verbose:
                 print(self._inhandles, self._procs, self._outhandles)
-            rh, wh, eh = select.select(self._inhandles.keys(), [], [], 1)
+            readhandle, writehandle, errorhandle = select.select(self._inhandles.keys(), [], [], 1)
             if verbose:
-                sys.stdout.write('%s %s %s ' % (rh, wh, eh))
-            if rh:
+                sys.stdout.write('%s %s %s ' % (readhandle, writehandle, errorhandle))
+            if readhandle:
                 self._update()
-                for fh in rh:
-                    fhandle, fproc, fdesc = self._inhandles[fh]
-                    d = fhandle.readline()
+                for filedesc in readhandle:
+                    fhandle, fproc, fdesc = self._inhandles[filedesc]
+                    indata = fhandle.readline()
                     if verbose:
-                        sys.stdout.write(' %d ' % len(d))
-                    if hasattr(d, 'decode'):
-                        d = d.decode()
-                    if d == '':
-                        self._inhandles.pop(fh)
-                        if fproc in self._procs:
-                            if not fproc.returncode:
-                                # We got the signal that the child should exit, but it doesn't 
-                                # have a return code.  Wait for the child and set our return code
-                                fproc.wait()
-                            rv |= fproc.returncode
-                            self._procs.remove(fproc)
-                        if len(self._procs) == 0 and [x for x in self._inhandles.keys()] == [sys.stdin.fileno()]:
-                            self._inhandles.pop(sys.stdin.fileno())
+                        sys.stdout.write(' %d ' % len(indata))
+                    if hasattr(indata, 'decode'):
+                        indata = indata.decode()
+                    if indata == '':
+                        retval |= self._cleanup(filedesc, fproc)
                         continue
-                    self._handle(d, fproc=fproc, fdesc=fdesc, verbose=verbose, update=False)
+                    self._handle(indata, fproc=fproc, fdesc=fdesc, verbose=verbose, update=False)
                 self._ltime = self._ctime
 
-        return rv
+        return retval
 
-        
 if __name__ == '__main__':
-    cmd = ' '.join(sys.argv[1:])
-    stamper = Stamper(cmd=cmd)
-    rv = stamper.run(False)
-    sys.exit(rv)
+    sys.exit(Stamper(cmd=' '.join(sys.argv[1:])).run(False))
