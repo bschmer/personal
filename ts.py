@@ -11,12 +11,13 @@ import sys
 import subprocess
 import datetime
 import select
+import argparse
 
 class Stamper(object):
     '''
     The class that does all the work.
     '''
-    def __init__(self, cmd=None, logfile=None):
+    def __init__(self, cmd=None, logfile=None, outputformat=None):
         '''
         Initialize the class
         '''
@@ -26,6 +27,7 @@ class Stamper(object):
         self._ltime = datetime.datetime.now()
         self._ctime = datetime.datetime.now()
         self._dtime = self._ctime - self._ltime
+        self._format = outputformat or '{timestamp} {deltasec:03d}.{deltamsec:06d} {pid} {cmd} - {output}'
 
         self._handle('Called as: %s\n' % ' '.join(sys.argv))
 
@@ -68,13 +70,13 @@ class Stamper(object):
                 cpid = fproc.pid
             else:
                 cpid = os.getpid()
-            ohandle.write('%s(%03d.%06d)[%s.%s] - %s' % (
-                self._ctime.isoformat(),
-                self._dtime.seconds,
-                self._dtime.microseconds,
-                cpid,
-                fdesc,
-                msg))
+            ohandle.write(self._format.format(
+                timestamp=self._ctime.isoformat(),
+                deltasec=self._dtime.seconds,
+                deltamsec=self._dtime.microseconds,
+                pid=cpid,
+                cmd=fdesc,
+                output=msg))
             ohandle.flush()
 
     def _update(self):
@@ -129,5 +131,27 @@ class Stamper(object):
 
         return retval
 
+def main():
+    '''
+    The main program.
+    '''
+    parser = argparse.ArgumentParser(
+        description='''Prepend timestamp and other data to lines output from a command.
+
+Format uses standard python format() options with the following values:
+    timestamp - The timestamp the output was received in ISO 8601 format
+    seconds   - The number of seconds since the epoch
+    deltasec  - The number of whole seconds elapsed since the last output
+    deltamsec - The fractional seconds elapsed since the last output
+    pid       - The process id that generated the output
+    cmd       - The name of the handle that generated the output
+    output    - The output from the command''',
+        formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('-f', '--format',
+                        default='{timestamp} {deltasec:03d}.{deltamsec:06d} {pid} {cmd} - {output}')
+    args, cmdargs = parser.parse_known_args()
+
+    sys.exit(Stamper(outputformat=args.format, cmd=' '.join(cmdargs)).run(False))
+
 if __name__ == '__main__':
-    sys.exit(Stamper(cmd=' '.join(sys.argv[1:])).run(False))
+    main()
