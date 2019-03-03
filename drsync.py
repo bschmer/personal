@@ -1,83 +1,100 @@
 #! /usr/bin/env python
 
-import os, sys, os.path, threading, Queue, time, subprocess
+'''
+Multi-threaded rsync for use if there are multiple paths to the data
+'''
+
+import os
+import os.path
+import sys
+import threading
+import Queue
+import time
+import subprocess
 from collections import namedtuple
 
-dest = sys.argv.pop()
-src = sys.argv.pop()
-
-cmd = ['rsync'] + sys.argv[1:]
-
-ips = ['172.100.1.15', '172.100.1.11', '172.100.1.16', '172.100.1.19', '172.100.1.28', '172.100.1.22']
-
-pathinfo = namedtuple('PathInfo', ['size', 'name', 'path'])
+PathInfo = namedtuple('PathInfo', ['size', 'name', 'path'])
 # We want comparisons to be reversed....
-a = pathinfo.__lt__
-pathinfo.__lt__, pathinfo.__gt__ = pathinfo.__gt__, pathinfo.__lt__
-pathinfo.__le__, pathinfo.__ge__ = pathinfo.__ge__, pathinfo.__le__
 
-dirtrigger = 0xfeeddeadbeeffeed
+PathInfo.__lt__, PathInfo.__gt__ = PathInfo.__gt__, PathInfo.__lt__
+PathInfo.__le__, PathInfo.__ge__ = PathInfo.__ge__, PathInfo.__le__
 
+DIRTRIGGER = 0xfeeddeadbeeffeed
 
-def genlist(path, q):
-    for r, d, f in os.walk(src):
-        for dirname in d:
-            fullpath = os.path.join(r, dirname).replace(src, '')
-            q.put(pathinfo(dirtrigger, dirname, fullpath))
+def genlist(path, workqueue):
+    '''
+    Generate list of items that need to be synced
+    '''
+    for root, dirs, files in os.walk(path):
+        for dirname in dirs:
+            fullpath = os.path.join(root, dirname).replace(path, '')
+            workqueue.put(PathInfo(DIRTRIGGER, dirname, fullpath))
             time.sleep(.2)
-        for filename in f:
-            fullpath = os.path.join(r, filename)
+        for filename in files:
+            fullpath = os.path.join(root, filename)
             size = os.stat(fullpath).st_size
-            if size == dirtrigger:
+            if size == DIRTRIGGER:
                 size -= 1
-            q.put(pathinfo(size, filename, fullpath.replace(src, '')))
-    q.put(pathinfo(-1, None, None))
+            workqueue.put(PathInfo(size, filename, fullpath.replace(path, '')))
+    workqueue.put(PathInfo(-1, None, None))
 
-def handle(ip, q, cmd, src, dest, index=0):
+def handle(ip_addr, workqueue, cmd, src, dest):
+    '''
+    Handle the work for a particular IP address
+    '''
     dircmd = list(cmd)
     dircmd.append("--no-recursive")
     dircmd.append("--dirs")
     dircmd.append("--include=*/")
     dircmd.append("--exclude=*")
     while True:
-        #time.sleep(index*10)
-        item = q.get()
+        item = workqueue.get()
         if not item.name:
             break
 
-        if item.size == dirtrigger:
+        if item.size == DIRTRIGGER:
             fullcmd = dircmd + ['%s%s/' % (src, item.path), '%s%s/' % (dest, item.path)]
         else:
             fullcmd = cmd + ['%s%s' % (src, item.path), '%s%s' % (dest, item.path)]
         print ' '.join(fullcmd)
         proc = subprocess.Popen(fullcmd)
-        rv = proc.wait()
-        if rv:
+        if proc.wait():
             print 'Failed', ' '.join(fullcmd)
             break
-            #time.sleep(0.02)
 
-        q.task_done()
+        workqueue.task_done()
 
+def main():
+    '''
+    Main program.
+    '''
+    dest = sys.argv.pop()
+    src = sys.argv.pop()
 
-q = Queue.PriorityQueue(24*1024)
-print q
-gt = threading.Thread(target = genlist, args=(src, q))
-gt.start()
+    cmd = ['rsync'] + sys.argv[1:]
 
-ipt = []
-for index, ip in enumerate(ips):
-    ipt.append(threading.Thread(target = handle, args=(ip, q, cmd, src, dest, index)))
+    ips = ['172.100.1.15', '172.100.1.11', '172.100.1.16', '172.100.1.19', '172.100.1.28', '172.100.1.22']
 
-for x in ipt:
-    x.start()
+    workqueue = Queue.PriorityQueue(24*1024)
+    print workqueue
+    generator_thread = threading.Thread(target=genlist, args=(src, workqueue))
+    generator_thread.start()
 
-print gt
+    ip_threads = []
+    for ip_addr in ips:
+        ip_threads.append(threading.Thread(target=handle, args=(ip_addr, workqueue, cmd, src, dest)))
 
-gt.join()
+    for curthread in ip_threads:
+        curthread.start()
 
-for i in range(len(ipt)):
-    q.put(pathinfo(-1, None, None))
-for x in ipt:
-    x.join()
+    print generator_thread
 
+    generator_thread.join()
+
+    for _ in range(len(ip_threads)):
+        workqueue.put(PathInfo(-1, None, None))
+    for curthread in ip_threads:
+        curthread.join()
+
+if __name__ == '__main__':
+    main()
