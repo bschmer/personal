@@ -107,13 +107,21 @@ class Key(object):
         data.update(dict([('p%s' % x[0], x[1]) for x in  enumerate(args)]))
         return self._key.substitute(data)
 
+    @property
+    def key(self):
+        '''
+        Return the key.
+        '''
+        return self._key
+
 class GenOut(object):
     '''
     Generate output
     '''
-    def __init__(self, cmd, sleeptime=1):
+    def __init__(self, cmd, sleeptime=1, oneshot=False):
         self._cmd = cmd
         self._sleeptime = sleeptime
+        self._oneshot = oneshot
 
     def __iter__(self):
         ltime = time.time()
@@ -133,6 +141,8 @@ class GenOut(object):
 
             for outputline in iter(proc.stdout.readline, b''):
                 yield outputline
+            if self._oneshot:
+                break
             time.sleep(deadline - time.time())
             ltime = time.time()
 
@@ -143,7 +153,8 @@ class GenOut(object):
         self._sleeptime = sleeptime
 
 def watch(cmd, key, comments=False, resolvepid=None, tstamp=None,
-          maxsplit=10000, pidreplace=None, sleeptime=1, iterations=0):
+          maxsplit=10000, pidreplace=None, sleeptime=1, iterations=0,
+          oneshot=False, skip=None):
     '''
     Watch the output from a command.
     '''
@@ -154,9 +165,9 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None,
     cmds = {}
     keyhandler = Key(key)
 
-    outgen = GenOut(cmd, sleeptime=sleeptime)
+    outgen = GenOut(cmd, sleeptime=sleeptime, oneshot=oneshot)
     for index, outputline in enumerate(outgen):
-        if select.select([sys.stdin], [], [], .01)[0]:
+        if select.select([sys.stdin], [], [], .0000000001)[0]:
             cmd = sys.stdin.readline().strip().lower()
             if cmd.startswith('q'):
                 # Exit app
@@ -182,6 +193,9 @@ def watch(cmd, key, comments=False, resolvepid=None, tstamp=None,
             continue
         linetokens = outputline.strip().split(None, maxsplit)
         curkey = keyhandler.handle(*linetokens)
+
+        if curkey in skip:
+            continue
 
         if resolvepid and len(linetokens) > resolvepid:
             pid = linetokens[resolvepid]
@@ -228,8 +242,14 @@ def main():
     parser.add_argument('-i', action='store', dest='interval', type=int, default=1)
     parser.add_argument('-I', action='store', dest='iterations', type=int, default=0)
     parser.add_argument('-c', action='store_true', dest='comments', default=False)
+    parser.add_argument('-o', action='store_true', dest='oneshot',
+                        default=False, help='Only run the command one time')
+    parser.add_argument('-s', action='append', dest='skip', default=[], nargs='+')
     parser.add_argument('rest', nargs=argparse.REMAINDER)
     args = parser.parse_args()
+
+    # Compact any skipped fields
+    args.skip = ','.join(list(itertools.chain(*args.skip))).split(',')
 
     if args.pid:
         args.pid = int(args.pid)
@@ -238,7 +258,8 @@ def main():
     if args.tstamp:
         args.tstamp = int(args.tstamp)
     watch(args.rest, args.key, comments=args.comments, resolvepid=args.pid, tstamp=args.tstamp,
-          pidreplace=args.pidreplace, sleeptime=args.interval, iterations=args.iterations)
+          pidreplace=args.pidreplace, sleeptime=args.interval, iterations=args.iterations,
+          oneshot=args.oneshot, skip=args.skip)
 
 if __name__ == '__main__':
     main()
