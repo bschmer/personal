@@ -25,59 +25,7 @@ import itertools
 import argparse
 import string
 import select
-
-def _output(msg, delta=None, ctime=None, term='\n'):
-    output = ''
-    if ctime is not None:
-        output += time.ctime(ctime)
-    if delta is not None:
-        output += '(%.2f)' % delta
-
-    if output:
-        output += ' '
-    if msg:
-        output += msg
-    start = ''
-    if term:
-        if '\r' in term:
-            start = ' '
-        output += term
-
-    sys.stdout.write(start + output)
-    sys.stdout.flush()
-
-
-class IdleSpin(object):
-    '''
-    Simple class to show that things are happening, i.e. we're not stuck
-    '''
-    def __init__(self, spinchars='|/-\\', mincycle=.1):
-        '''
-        Initialize the spinner
-        '''
-        self._chars = itertools.cycle(spinchars)
-        self._lastspin = 0
-        self._lastout = time.time()
-        self._mincycle = mincycle
-
-    def spin(self):
-        '''
-        Display the indicator
-        '''
-        ctime = time.time()
-        if self._lastspin + self._mincycle > ctime:
-            return
-        _output(next(self._chars), delta=ctime-self._lastout, term='\r')
-        self._lastspin = ctime
-
-    def output(self, msg, *args, **kwds):
-        '''
-        Not really sure how this is different than spin() aside from the rate limiter.
-        '''
-        ctime = time.time()
-        _output(msg, ctime=ctime, delta=ctime - self._lastout, *args, **kwds)
-        self._lastout = ctime
-
+from spin import IdleSpin
 
 def showdiff(item0, item1):
     '''
