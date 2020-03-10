@@ -5,6 +5,7 @@ import sys
 import glob
 import numpy as np
 import spin
+import datetime
 import cv2
 
 options = ['front', 'back', 'left_repeater', 'right_repeater']
@@ -35,10 +36,12 @@ def framesgenerator(*paths):
                 break
             yield frames
 spinner = spin.IdleSpin()
-skip = 15
+skip = 1
+sleep = 1
 counter = 0
 paths = sys.argv[1:]
 lastframe = None
+saving = False
 for frames in framesgenerator(*paths):
     spinner.spin()
     counter += 1
@@ -75,16 +78,28 @@ for frames in framesgenerator(*paths):
                 rv = cv2.waitKey(1)
         lastframe = gray
         if motion:
+            spinner.shift()
             cv2.imshow('frame', frame)
-            rv = cv2.waitKey(1)
-            if rv & 0xFF == ord('q'):
-                break
-            if rv & 0xFF == ord('+'):
-                skip = min(skip+1, 30)
-                print skip
-            if rv & 0xFF == ord('-'):
-                skip = max(skip-1, 1)
-                print skip
+    rv = cv2.waitKey(sleep)
+    if rv & 0xFF == ord('q'):
+        break
+    if rv & 0xFF == ord('+'):
+        skip = min(skip+1, 30)
+        print skip
+    if rv & 0xFF == ord('-'):
+        skip = max(skip-1, 1)
+        print skip
+    if rv & 0xFF == ord('p'):
+        sleep = min(sleep+100, 2000)
+    if rv & 0xFF == ord('m'):
+        sleep = max(sleep-100, 1)
+    if rv & 0xFF == ord('s'):
+        cv2.imwrite('%s.jpg' % datetime.datetime.now().isoformat(), frame)
+    if rv & 0xFF == ord('w'):
+        saving = not saving
+        print saving
+    if saving:
+        cv2.imwrite('%s.jpg' % datetime.datetime.now().isoformat(), frame)
 
 cv2.waitKey(0)
 cv2.destroyAllWindows()
