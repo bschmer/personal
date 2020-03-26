@@ -4,7 +4,6 @@
 Simple module to provide feedback to the user that work is being done.
 '''
 
-import os
 import sys
 import time
 import itertools
@@ -110,48 +109,68 @@ class IdleSpin(object):
         '''
         Show statistics at the end
         '''
-        print ''
+        sys.stderr.write('\n')
         if self._showstats:
-            print self._stats
+            sys.stderr.write('%s\n' % self._stats)
 
-    def getStats(self):
+    def get_stats(self):
         '''
         Return the stats to the caller
         '''
         return self._stats
 
 class TestSpin(unittest.TestCase):
-    def test_noSpin(self):
+    '''
+    Tests for IdleSpin class
+    '''
+    def test_no_spin(self):
+        '''
+        Test of no spinning
+        '''
         spinner = IdleSpin()
-        self.assertTrue(spinner.getStats(), dict(msgs=0, shifts=0, spins=0, skips=0))
-        
-    def test_spinCollapse(self):
-        spinner = IdleSpin()
-        loops = 3
-        for i in range(0, loops):
-            spinner.spin()
-        self.assertTrue(spinner.getStats(), dict(msgs=0, shifts=0, spins=1, skips=(loops-1)))
+        self.assertTrue(spinner.get_stats(), dict(msgs=0, shifts=0, spins=0, skips=0))
 
-    def test_spinNormal(self):
+    def test_spin_collapse(self):
+        '''
+        Test collapsing
+        '''
         spinner = IdleSpin()
         loops = 3
-        for i in range(0, loops):
+        for _ in range(0, loops):
+            spinner.spin()
+        self.assertTrue(spinner.get_stats(), dict(msgs=0, shifts=0, spins=1, skips=(loops-1)))
+
+    def test_spin_normal(self):
+        '''
+        Test normal spin
+        '''
+        spinner = IdleSpin()
+        loops = 3
+        for _ in range(0, loops):
             spinner.spin()
             time.sleep(.15)
-        self.assertTrue(spinner.getStats(), dict(msgs=0, shifts=0, spins=loops, skips=0))
+        self.assertTrue(spinner.get_stats(), dict(msgs=0, shifts=0, spins=loops, skips=0))
 
     def test_group(self):
+        '''
+        Test grouping
+        '''
         spinner = IdleSpin()
-        for i in range(0, 30):
+        for _ in range(0, 30):
             spinner.spin()
             spinner.shift()
-        self.assertTrue(spinner.getStats(), dict(msgs=0, shifts=30, spins=0, skips=0))
-        
-if __name__ == '__main__':
+        self.assertTrue(spinner.get_stats(), dict(msgs=0, shifts=30, spins=0, skips=0))
+
+def main():
+    '''
+    Main program
+    '''
     #unittest.main()
     spinner = IdleSpin()
-    for i in range(0, 101):
+    for _ in range(0, 101):
         spinner.spin()
         time.sleep(.15)
         spinner.shift()
 
+if __name__ == '__main__':
+    main()
