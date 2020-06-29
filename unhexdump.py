@@ -3,8 +3,11 @@
 import sys
 
 outfile = open(sys.argv[2], 'wb')
+capc = False
 for line in open(sys.argv[1]):
-    lp = line.strip().split()
+    if not capc and '|'  in line:
+        capc = True
+    lp = line.split('|')[0].strip().split()
     if not lp:
         # Blank line most likely
         continue
@@ -19,7 +22,11 @@ for line in open(sys.argv[1]):
         outfile.write(data)
     # Hexdump bytes are encoded such that they need to be swapped before
     # decoding
-    data = (''.join(['%s%s' % (x[2:], x[:2]) for x in lp])).decode('hex')
+    if capc:
+        print ''.join(lp)
+        data = (''.join(lp)).decode('hex')
+    else:
+        data = (''.join(['%s%s' % (x[2:], x[:2]) for x in lp])).decode('hex')
     outfile.write(data)
 outfile.close()
 
