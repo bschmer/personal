@@ -5,6 +5,7 @@
 import os
 import os.path
 import urllib3
+import configparser
 urllib3.disable_warnings()
 import time
 from slackclient import SlackClient
@@ -38,8 +39,8 @@ def cmpdict(dict1, dict2, skip=[]):
                 rv = cmpdict(dict1[k], dict2[k], skip=skip)
                 if rv:
                     changed[k] = rv
-                else:
-                    changed[k] = '%s -> %s' % (dict1[k], dict2[k])
+            else:
+                changed[k] = '%s -> %s' % (dict1[k], dict2[k])
     rv = {}
     if added:
         rv['added'] = added
