@@ -1,0 +1,105 @@
+#! /usr/bin/env bash
+
+function cleanup () {
+    rm -f /tmp/{cur,last,diffout}.$$
+    exit 0
+}
+
+trap 'cleanup' SIGINT
+
+sleeptime=1
+nochangeiterations=900
+timeout=1800
+
+myargs=""
+# Pop arguments off of the argument list until we hit one that isn't one of our arguments
+while :
+do
+    if [[ $1 == -h ]]
+    then
+        echo "Usage: $0 [OPTION]... COMMAND [ARGS]"
+        echo "Monitor output from command and show differences when they exist"
+        echo "Not that the command cannot currently contain any pipelines"
+        echo ""
+        echo "    -i<num> Time to pause between checks."
+        echo "    -I<num> Number of iterations to wait for no change before exiting.  0 means don't exit."
+        echo "    -t<num> Maximum time to watch command.  0 means don't time out."
+        exit 0
+    fi
+    if [[ $1 == -* ]]
+    then
+        if [ ${#1} -ne 2 ]
+        then
+            # argument and param stacked together
+            myargs="${myargs} ${1}"
+            shift
+        elif [ ${#1} -lt 2 ]
+        then
+            break
+        else
+            myargs="${myargs} ${1} ${2}"
+            shift
+            shift
+        fi
+    else
+         break
+    fi
+done
+
+while getopts "i:I:t:" opt ${myargs}
+do
+    case ${opt} in
+      i)
+          sleeptime=${OPTARG}
+          ;;
+      I)
+          nochangeiterations=${OPTARG}
+          ;;
+      t)
+          timeout=${OPTARG}
+          ;;
+    esac
+done
+
+lastchange=0
+if [ ${timeout} -gt 0 ]
+then
+    deadline=$(expr $(date +%s) + ${timeout})
+fi
+while :
+do
+    "$@" > /tmp/cur.$$
+    diff --unified /tmp/last.$$ /tmp/cur.$$ >/tmp/diffout.$$ 2>/dev/null
+    if [ $? -ne 0 ]
+    then
+        lastchange=0
+        date
+        if [ -s /tmp/diffout.$$ ]
+        then
+            echo "Differences:"
+            cat /tmp/diffout.$$
+        else
+            echo "Current contents:"
+            cat /tmp/cur.$$
+        fi
+  
+        mv /tmp/cur.$$ /tmp/last.$$
+    else
+        lastchange=$(expr ${lastchange} + 1)
+        if [ ${nochangeiterations} -gt 0 ]
+        then
+            if [ ${lastchange} -gt ${nochangeiterations} ]
+            then
+                break
+            fi
+        fi
+    fi
+    if [ -n "${deadline}" ]
+    then
+        if [ $(date +%s) -gt ${deadline} ]
+        then
+            break
+        fi
+    fi
+    sleep ${sleeptime}
+done
