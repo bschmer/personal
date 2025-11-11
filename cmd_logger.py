@@ -20,6 +20,170 @@ Prometheus-style metrics (no deps) include:
 - streams connected/disconnected/current and stream bytes sent
 - metrics scrape count, bind info, config info
 - idle alerts total, idle active (gauge), idle threshold seconds (gauge)
+
+Generated with the following prompt, at least that's what I was told by the AI:
+You are to write a single self-contained Python 3 script named `cmd_logger.py` (no external deps; stdlib only). It captures a command’s stdout OR stdin, writes to rotating log files (rotation ONLY between line breaks unless explicitly forced), serves metrics and live stream over HTTP, and supports live reconfiguration.
+
+## High-level requirements
+- Source of input:
+  1) Run a command (default: `bpftrace BPFTRACE -p PID:pd-protod`) OR
+  2) Read from stdin when data is piped. If stdin is piped **and** the user did not explicitly set --cmd, blank out the default command and read stdin instead.
+- Rotation rules:
+  - Rotate by max uncompressed bytes and/or by timer interval, but **only after a line break** (end of line) unless explicitly rotated by an HTTP endpoint which must rotate immediately.
+  - Support compression modes:
+    - `none`: write plaintext.
+    - `inline`: write gzip-compressed as you go (`*.current.log.gz`).
+    - `after`: write plaintext while open, then gzip the file after close/rotation.
+  - Retain only the newest N rotated files (delete the rest).
+- File naming:
+  - Active file: `<prefix>.current.log` or `.current.log.gz` (for inline).
+  - On rotation: rename to `<prefix>-YYYYMMDD-HHMMSS-<monotonic_suffix>.log[.gz]`.
+- Echo option: optionally tee each written line to stdout as well.
+- Add optional ISO-8601 timestamp at the **beginning** of each emitted line (file, echo, stream) when enabled.
+- Idle detection: if no data arrives for configured seconds, inject a synthetic line `[IDLE for Ns]` exactly once per idle period. Implement **without polling** using a re-armable `threading.Timer` (no busy sleep loops). When data resumes, clear the idle-active gauge.
+
+## CLI (short + long flags)
+- `-c, --cmd` string; default `bpftrace BPFTRACE -p PID:pd-protod`.
+- `-b, --bpftrace` inline program or `@/path/to/file`; default `/usr/bin/replication_monitor.bt`. Replace `BPFTRACE` token in `--cmd` with a path to a file containing the program (create a temp file for inline).
+- Replace `PID:<procname>` tokens in `--cmd` with pid from `pidof -s <procname>`; if not found, leave token as-is and warn to stderr.
+- `-o, --out-dir` directory, default `.`.
+- `-n, --prefix` filename prefix, default `capture`.
+- `-s, --max-bytes` rotate size; accepts `123`, `10K`, `25M`, `1G`, etc.
+- `-t, --interval` rotate interval; accepts seconds or `10s`, `5m`, `2h`, `1d`.
+- `-z, --compress` one of `none|inline|after` (default `none`).
+- `-r, --retain` number of rotated files to keep (default 10).
+- `-u, --flush-interval` seconds (float) to flush buffers periodically (0 disables).
+- `-v, --env KEY=VALUE` repeatable; extra env for the command.
+- `-w, --cwd` working dir for the command.
+- `-e, --echo` tee to stdout.
+- `-T, --timestamp` prefix each line with ISO-8601 timestamp.
+- `-I, --idle-alert` seconds; 0 disables (default 0).
+- `-m, --metrics` enable HTTP server.
+- `-M, --metrics-bind` bind (host:port). Accepts `":0"` to auto-pick a free port; print chosen host:port to stderr on start.
+- `-R, --ring-size` int; default 25 for stream replay.
+
+## HTTP server (Threading, stdlib BaseHTTPRequestHandler)
+Start only with `-m`. Serve on chosen host:port and print:
+`HTTP listening at http://HOST:PORT (paths: /metrics, /healthz, /stream, /rotate, /config)`
+
+Endpoints:
+- `GET /metrics` : Prometheus text format (no client lib).
+- `GET /healthz` : returns `ok\n`.
+- `GET /stream` : Server-Sent Events (SSE, `text/event-stream`), replay last N lines (ring buffer), then live push. Heartbeat comment every ~10s. Query `?raw=1` switches to raw text streaming (no SSE framing). Support multiple concurrent subscribers. Count only payload bytes in stream byte counter.
+- `/rotate` : accept **GET and POST**, with or without trailing slash; perform an **immediate** rotation now (close current, rename/compress as needed, open a new current file). Support optional query `?soft=1` to schedule rotation on the next line break instead of immediate.
+  - Response JSON: `{ ok, message, previous_file, current_file }`.
+- `/config`:
+  - `GET /config` → return current runtime config and state as JSON, including current file path and bytes written uncompressed.
+  - `POST /config` (JSON body) → update live parameters (everything except the command):
+    - `out_dir`, `prefix`, `compress (none|inline|after)`, `retain`, `max_bytes`, `interval`, `echo`, `timestamp`, `ring_size`, `idle_alert_secs`.
+    - For options requiring a new file to take effect (`out_dir`, `prefix`, `compress`), set a flag that rotates after the next line (`rotate_after_this_line = True`). Also accept `"rotate_now": true` in the body to rotate immediately.
+  - Return JSON `{ ok, message, updated }` or an error with code 400.
+
+Path normalization: handlers should treat `/rotate` and `/rotate/` equivalently. Same for `/config`.
+
+## Streaming hub
+- Implement a `_StreamHub` with:
+  - `set_ring_size(n)`, `snapshot()`, `publish(text)`, `subscribe()` (returns a Queue), `unsubscribe(q)`.
+  - Keep a `deque(maxlen=n)` ring of recent lines (strings).
+  - Publish pushes to all subscriber queues non-blockingly (drop if full).
+
+## Rotation & files
+- `RotatingWriter` class:
+  - Fields: out_dir, prefix, compress, retain, time_fmt, max_bytes, interval_s, echo, timestamp_flag.
+  - `open_new()` creates a new current file (`.current.log` or `.current.log.gz`).
+  - `write_line(bytes)` writes a **whole line**:
+    - Optional timestamp prefix.
+    - Echo to stdout if `echo`.
+    - Update metrics, publish to stream hub, update disk size/compression ratio.
+    - If over size or timer flag set, mark `rotate_after_this_line = True` (but don’t rotate mid-line).
+  - `begin_line()` checks `rotate_after_this_line` and calls `rotate()` if set (rotation is between lines).
+  - `rotate()`:
+    - Close current, optionally gzip if `after`, rename to final rotated name, prune retention, then immediately `open_new()` to continue writing to a fresh current file.
+  - `close_current(finalize=True)` for shutdown.
+  - Maintain “uncompressed bytes written” count per current file for sizing logic and metrics.
+- Timer rotation: background thread may set a “due” flag periodically, but actual rotate occurs between lines (except explicit `/rotate`).
+- Retention: only delete files that match naming scheme for this prefix (newest kept).
+
+## Idle detection (no polling)
+- `IdleMonitor` class using `threading.Timer`:
+  - `arm(threshold_secs)` sets/changes threshold (0 disables).
+  - `poke()` called on each successful line write to rearm timer and clear idle-active gauge.
+  - When timer fires and still idle, emit `[IDLE for Ns]\n` via writer (respects timestamp prefix), increment idle alerts metric, set idle-active gauge.
+  - Do **not** rearm automatically after firing; next real input will rearm on `poke()`.
+  - Expose instance as `writer.idle_monitor` so `write_line()` can call `poke()` with zero coupling.
+  - Stop gracefully on shutdown.
+
+## BPFTRACE & PID substitution
+- If `--bpftrace` starts with `@`, use the file path after `@`.
+- If it’s inline, write content to a temporary file and substitute its quoted path into the command wherever `BPFTRACE` appears.
+- Replace `PID:<procname>` with `pidof -s <procname>`; if not found, leave token and warn to stderr.
+- If stdin is piped and user didn’t explicitly pass `--cmd`, disable the default command and read stdin.
+
+## Metrics (Prometheus text; no deps)
+Expose the following (names and types as below):
+
+Counters:
+- `cmdlogger_lines_total`
+- `cmdlogger_bytes_total`
+- `cmdlogger_files_rotated_total`
+- `cmdlogger_metrics_scrapes_total`
+- `cmdlogger_streams_connected_total`
+- `cmdlogger_streams_disconnected_total`
+- `cmdlogger_stream_bytes_sent_total`
+- `cmdlogger_idle_alerts_total`
+
+Gauges:
+- `cmdlogger_current_file_bytes`
+- `cmdlogger_current_file_disk_bytes`
+- `cmdlogger_current_compression_ratio`
+- `cmdlogger_start_time_seconds`
+- `cmdlogger_uptime_seconds`
+- `cmdlogger_last_rotation_time_seconds`
+- `cmdlogger_last_write_time_seconds`
+- `cmdlogger_process_running{mode="cmd|stdin"}`
+- `cmdlogger_streams_current`
+- `cmdlogger_idle_active`
+- `cmdlogger_idle_threshold_seconds`
+- `cmdlogger_config_info{compress,retain,max_bytes,interval_seconds,echo,timestamp,ring_size}=1`
+- `cmdlogger_current_file_info{path="..."}=1`
+- `cmdlogger_metrics_bind_info{host,port}=1`
+
+Notes:
+- `current_file_disk_bytes` should reflect on-disk size of the active file. When `compress=inline`, compute compression ratio = uncompressed_bytes / max(disk_bytes, 1); otherwise 1.0.
+- Count **only payload bytes** for stream bytes (ignore SSE framing and heartbeats in the counter).
+- On rotation, reset per-current-file gauges as appropriate and update `last_rotation_time_seconds`.
+
+## HTTP details
+- Implement with `BaseHTTPRequestHandler` + `ThreadingMixIn` HTTPServer.
+- Normalize paths by stripping a trailing slash.
+- Accept `/rotate` via GET and POST; support `?soft=1` to schedule rotation at next line boundary (vs immediate “hard” rotate).
+- `/config` POST must parse JSON body and validate types. For `max_bytes` & `interval`, accept both numeric and “human” strings; apply changes immediately where possible. For options needing a new file (`out_dir`, `prefix`, `compress`), set `rotate_after_this_line = True` and also accept `"rotate_now": true` to rotate immediately.
+- `/stream` must:
+  - Replay the ring buffer (size configurable with `-R`).
+  - Then stream live lines using SSE (`data: ...` frames) with a heartbeat comment every ~10s; or raw text when `?raw=1`.
+  - Support multiple concurrent subscribers safely.
+  - Update stream metrics: connected/disconnected counters, current gauge, and bytes sent counter.
+
+## Signals & shutdown
+- Handle SIGINT/SIGTERM: finish the current line, perform any pending rotation if needed, close current file (finalize), stop threads/timers, shut down HTTP server, exit 0.
+- Clean up any temp file created for inline bpftrace on exit.
+
+## Implementation constraints
+- Python 3 stdlib only.
+- Performance: no periodic `time.sleep` polling for idle detection; use `threading.Timer`. For rotate-by-interval you may use a lightweight periodic thread but it must not block the write path.
+- Thread safety: protect shared state minimally. Avoid blocking writer on slow stream subscribers (use bounded queues and drop when full).
+- Code should be a single file, ~readable, with clear classes: `RotatingWriter`, `IdleMonitor`, `_StreamHub`, `_Metrics`, HTTP server (`_ThreadingHTTPServer`, handler).
+
+## Acceptance checks (examples)
+- Start with: `./cmd_logger.py -m -M :0 -n demo -z inline -s 5M -t 10m -r 5 -e -T -R 100 -c "yes hello"`
+  - See HTTP “listening at …” on stderr, and files appear in `.` with `.current.log.gz`, rotating at ~5M.
+  - `curl /metrics` shows gauges/counters updating; `curl -N /stream` shows live lines; connects/disconnects reflected.
+  - `curl -X POST /rotate` immediately closes current and opens a new current; response JSON returns previous/current file paths.
+  - `curl -X POST /config -d '{"compress":"after","prefix":"x","rotate_now":true}'` immediately rotates; next files reflect new settings.
+- Pipe mode: `yes data | ./cmd_logger.py -m -M :0` must not run the default command; must read stdin and log/stream lines.
+- Idle: `-I 5` must inject `[IDLE for 5s]` after 5s of inactivity, once per idle period, and set/reset idle metrics accordingly.
+
+Generate the full script now.
 """
 
 import argparse
