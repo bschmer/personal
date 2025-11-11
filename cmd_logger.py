@@ -1,189 +1,113 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-cmd_logger.py — capture stdout (from a command or stdin) and write rolling log files.
-Rotation happens ONLY on line breaks (except explicit /rotate). Features:
-- Short flags
-- Optional echo to stdout
-- ISO-8601 timestamp prefix per line
-- Idle alert injection without polling (re-armable timer)
-- BPFTRACE token replacement for --cmd and PID:<name> substitution via pidof
-- Default cmd 'bpftrace BPFTRACE -p PID:pd-protod' ignored when stdin is piped
-- Default --bpftrace is /usr/bin/replication_monitor.bt
-- HTTP: /metrics, /healthz, /stream (SSE or ?raw=1), /rotate, /config (GET/POST)
-- Auto-pick HTTP port with -M :0; prints chosen endpoint at startup
-- Ring buffer replay for /stream (configurable)
+cmd_logger.py — capture a command’s stdout (or piped stdin) into rotating log files,
+serve Prometheus-style metrics and a live stream, support live reconfiguration,
+and provide precise idle detection without polling.
 
-Prometheus-style metrics (no deps) include:
-- lines/bytes totals, files rotated, start/uptime/last rotation, last write time
-- current file bytes (uncompressed), disk bytes, compression ratio
-- streams connected/disconnected/current and stream bytes sent
-- metrics scrape count, bind info, config info
-- idle alerts total, idle active (gauge), idle threshold seconds (gauge)
+REGEN PROMPT (copy-paste below into any code-gen assistant to recreate this script):
 
-Generated with the following prompt, at least that's what I was told by the AI:
-You are to write a single self-contained Python 3 script named `cmd_logger.py` (no external deps; stdlib only). It captures a command’s stdout OR stdin, writes to rotating log files (rotation ONLY between line breaks unless explicitly forced), serves metrics and live stream over HTTP, and supports live reconfiguration.
+You are to write a single self-contained Python 3 script named `cmd_logger.py` (stdlib only; no external deps).
+It captures a command’s stdout OR stdin, writes to rotating log files with rotation ONLY between line breaks
+(unless explicitly forced), serves metrics and live stream over HTTP, and supports live reconfiguration.
 
-## High-level requirements
-- Source of input:
-  1) Run a command (default: `bpftrace BPFTRACE -p PID:pd-protod`) OR
-  2) Read from stdin when data is piped. If stdin is piped **and** the user did not explicitly set --cmd, blank out the default command and read stdin instead.
-- Rotation rules:
-  - Rotate by max uncompressed bytes and/or by timer interval, but **only after a line break** (end of line) unless explicitly rotated by an HTTP endpoint which must rotate immediately.
-  - Support compression modes:
-    - `none`: write plaintext.
-    - `inline`: write gzip-compressed as you go (`*.current.log.gz`).
-    - `after`: write plaintext while open, then gzip the file after close/rotation.
-  - Retain only the newest N rotated files (delete the rest).
-- File naming:
-  - Active file: `<prefix>.current.log` or `.current.log.gz` (for inline).
-  - On rotation: rename to `<prefix>-YYYYMMDD-HHMMSS-<monotonic_suffix>.log[.gz]`.
-- Echo option: optionally tee each written line to stdout as well.
-- Add optional ISO-8601 timestamp at the **beginning** of each emitted line (file, echo, stream) when enabled.
-- Idle detection: if no data arrives for configured seconds, inject a synthetic line `[IDLE for Ns]` exactly once per idle period. Implement **without polling** using a re-armable `threading.Timer` (no busy sleep loops). When data resumes, clear the idle-active gauge.
+### Input sources
+- Run a command (default: `bpftrace BPFTRACE -p PID:pd-protod`) OR read from stdin.
+- If stdin is piped AND the user did not explicitly set `--cmd`, ignore the default command and read stdin.
 
-## CLI (short + long flags)
+### CLI (short+long)
 - `-c, --cmd` string; default `bpftrace BPFTRACE -p PID:pd-protod`.
-- `-b, --bpftrace` inline program or `@/path/to/file`; default `/usr/bin/replication_monitor.bt`. Replace `BPFTRACE` token in `--cmd` with a path to a file containing the program (create a temp file for inline).
-- Replace `PID:<procname>` tokens in `--cmd` with pid from `pidof -s <procname>`; if not found, leave token as-is and warn to stderr.
-- `-o, --out-dir` directory, default `.`.
-- `-n, --prefix` filename prefix, default `capture`.
-- `-s, --max-bytes` rotate size; accepts `123`, `10K`, `25M`, `1G`, etc.
-- `-t, --interval` rotate interval; accepts seconds or `10s`, `5m`, `2h`, `1d`.
-- `-z, --compress` one of `none|inline|after` (default `none`).
-- `-r, --retain` number of rotated files to keep (default 10).
+- `-b, --bpftrace` (repeatable): Each item can be a **file path**, a **glob pattern**, or **inline code**.
+  Resolution order: glob matches (sorted) → plain file → inline (use `inline:...` to force inline).
+  Concatenate all resolved sources into one temp file and replace `BPFTRACE` in `--cmd` with that file path.
+  Default source is `/usr/bin/replication_monitor.bt` if no `-b` provided.
+- Replace `PID:<procname>` in `--cmd` with `pidof -s <procname>` (if missing, leave token and warn to stderr).
+- `-o, --out-dir` (default `.`); `-n, --prefix` (default `capture`).
+- `-s, --max-bytes` rotate by size; accepts `123`, `10K`, `25M`, `1G`, ... (uncompressed byte count).
+- `-t, --interval` rotate by time; accepts seconds or `10s`, `5m`, `2h`, `1d` (rotation still occurs only on line breaks).
+- `-z, --compress` one of `none|inline|after`:
+  - none: write plaintext
+  - inline: write gzip as-you-go (`*.current.log.gz`)
+  - after: write plaintext then gzip the rotated file asynchronously
+- `-r, --retain` keep newest N rotated logs (default 10).
 - `-u, --flush-interval` seconds (float) to flush buffers periodically (0 disables).
 - `-v, --env KEY=VALUE` repeatable; extra env for the command.
-- `-w, --cwd` working dir for the command.
-- `-e, --echo` tee to stdout.
-- `-T, --timestamp` prefix each line with ISO-8601 timestamp.
-- `-I, --idle-alert` seconds; 0 disables (default 0).
-- `-m, --metrics` enable HTTP server.
-- `-M, --metrics-bind` bind (host:port). Accepts `":0"` to auto-pick a free port; print chosen host:port to stderr on start.
-- `-R, --ring-size` int; default 25 for stream replay.
+- `-w, --cwd` working directory for the command.
+- `-e, --echo` tee each line to stdout.
+- `-T, --timestamp` prefix each emitted line (file/echo/stream) with ISO-8601 timestamp + space.
+- `-I, --idle-alert` seconds; if no data arrives for this long, inject `[IDLE for Ns]` (no polling; use a re-armable timer).
+- `-m, --metrics` enable HTTP server; `-M, --metrics-bind` bind (host:port). `:0` or `0` auto-picks a free port (print chosen URL).
+- `-R, --ring-size` replay this many recent lines to new stream subscribers (default 25).
 
-## HTTP server (Threading, stdlib BaseHTTPRequestHandler)
-Start only with `-m`. Serve on chosen host:port and print:
+### Rotation & files
+- Active file: `<prefix>.current.log` or `.current.log.gz` (inline mode).
+- On rotation: rename to `<prefix>-YYYYMMDD-HHMMSS-<monoSuffix>.log[.gz]`.
+- Rotate due to size and/or timer **only between lines** (respect line boundaries).
+- Retention: delete older rotated files beyond N.
+
+### HTTP server (BaseHTTPRequestHandler + ThreadingMixIn)
+Start only with `-m`. On startup print:
 `HTTP listening at http://HOST:PORT (paths: /metrics, /healthz, /stream, /rotate, /config)`
 
 Endpoints:
-- `GET /metrics` : Prometheus text format (no client lib).
-- `GET /healthz` : returns `ok\n`.
-- `GET /stream` : Server-Sent Events (SSE, `text/event-stream`), replay last N lines (ring buffer), then live push. Heartbeat comment every ~10s. Query `?raw=1` switches to raw text streaming (no SSE framing). Support multiple concurrent subscribers. Count only payload bytes in stream byte counter.
-- `/rotate` : accept **GET and POST**, with or without trailing slash; perform an **immediate** rotation now (close current, rename/compress as needed, open a new current file). Support optional query `?soft=1` to schedule rotation on the next line break instead of immediate.
-  - Response JSON: `{ ok, message, previous_file, current_file }`.
-- `/config`:
-  - `GET /config` → return current runtime config and state as JSON, including current file path and bytes written uncompressed.
-  - `POST /config` (JSON body) → update live parameters (everything except the command):
-    - `out_dir`, `prefix`, `compress (none|inline|after)`, `retain`, `max_bytes`, `interval`, `echo`, `timestamp`, `ring_size`, `idle_alert_secs`.
-    - For options requiring a new file to take effect (`out_dir`, `prefix`, `compress`), set a flag that rotates after the next line (`rotate_after_this_line = True`). Also accept `"rotate_now": true` in the body to rotate immediately.
-  - Return JSON `{ ok, message, updated }` or an error with code 400.
+- `GET /metrics` — Prometheus text format (no client lib).
+- `GET /healthz` — returns `ok\n`.
+- `GET /stream` — SSE (`text/event-stream`) streaming; replay last N lines, then push live lines.
+  Heartbeat comment every ~10s. `?raw=1` streams raw text (no SSE framing).
+- `/rotate` — **GET and POST**, with or without trailing slash. Immediate rotation (“hard”) by default:
+  close current, finalize/rename/gzip as needed, and open a new current file. Optional `?soft=1` schedules
+  a rotation at next line boundary instead. Response JSON: `{ ok, message, previous_file, current_file }`.
+- `/config` — normalize trailing slash:
+  - `GET /config` → JSON with current runtime config and state (incl. current file path and uncompressed bytes).
+  - `POST /config` → JSON body to update live parameters (everything except the command):
+    - `out_dir`, `prefix`, `compress (none|inline|after)`, `retain`, `max_bytes`, `interval`,
+      `echo`, `timestamp`, `ring_size`, `idle_alert_secs`.
+    - For options that require a new file (`out_dir`, `prefix`, `compress`), set `rotate_after_this_line = True`.
+      Support `"rotate_now": true` to rotate immediately.
+  - Return `{ ok, message, updated }` or 400 on validation errors.
 
-Path normalization: handlers should treat `/rotate` and `/rotate/` equivalently. Same for `/config`.
+### Streaming hub
+- Maintain a ring buffer (deque) of recent lines; publish non-blocking to each subscriber queue (drop if full).
 
-## Streaming hub
-- Implement a `_StreamHub` with:
-  - `set_ring_size(n)`, `snapshot()`, `publish(text)`, `subscribe()` (returns a Queue), `unsubscribe(q)`.
-  - Keep a `deque(maxlen=n)` ring of recent lines (strings).
-  - Publish pushes to all subscriber queues non-blockingly (drop if full).
+### Idle detection (no polling)
+- Implement `IdleMonitor` using `threading.Timer`:
+  - `arm(threshold)` sets/changes threshold (0 disables).
+  - `poke()` on each real line write to re-arm.
+  - On fire, verify still idle; inject `[IDLE for Ns]\n`, update metrics, and do not auto-rearm.
+  - Clear idle-active gauge when input resumes.
 
-## Rotation & files
-- `RotatingWriter` class:
-  - Fields: out_dir, prefix, compress, retain, time_fmt, max_bytes, interval_s, echo, timestamp_flag.
-  - `open_new()` creates a new current file (`.current.log` or `.current.log.gz`).
-  - `write_line(bytes)` writes a **whole line**:
-    - Optional timestamp prefix.
-    - Echo to stdout if `echo`.
-    - Update metrics, publish to stream hub, update disk size/compression ratio.
-    - If over size or timer flag set, mark `rotate_after_this_line = True` (but don’t rotate mid-line).
-  - `begin_line()` checks `rotate_after_this_line` and calls `rotate()` if set (rotation is between lines).
-  - `rotate()`:
-    - Close current, optionally gzip if `after`, rename to final rotated name, prune retention, then immediately `open_new()` to continue writing to a fresh current file.
-  - `close_current(finalize=True)` for shutdown.
-  - Maintain “uncompressed bytes written” count per current file for sizing logic and metrics.
-- Timer rotation: background thread may set a “due” flag periodically, but actual rotate occurs between lines (except explicit `/rotate`).
-- Retention: only delete files that match naming scheme for this prefix (newest kept).
-
-## Idle detection (no polling)
-- `IdleMonitor` class using `threading.Timer`:
-  - `arm(threshold_secs)` sets/changes threshold (0 disables).
-  - `poke()` called on each successful line write to rearm timer and clear idle-active gauge.
-  - When timer fires and still idle, emit `[IDLE for Ns]\n` via writer (respects timestamp prefix), increment idle alerts metric, set idle-active gauge.
-  - Do **not** rearm automatically after firing; next real input will rearm on `poke()`.
-  - Expose instance as `writer.idle_monitor` so `write_line()` can call `poke()` with zero coupling.
-  - Stop gracefully on shutdown.
-
-## BPFTRACE & PID substitution
-- If `--bpftrace` starts with `@`, use the file path after `@`.
-- If it’s inline, write content to a temporary file and substitute its quoted path into the command wherever `BPFTRACE` appears.
-- Replace `PID:<procname>` with `pidof -s <procname>`; if not found, leave token and warn to stderr.
-- If stdin is piped and user didn’t explicitly pass `--cmd`, disable the default command and read stdin.
-
-## Metrics (Prometheus text; no deps)
-Expose the following (names and types as below):
-
+### Metrics (Prometheus text; names & types as below)
 Counters:
-- `cmdlogger_lines_total`
-- `cmdlogger_bytes_total`
-- `cmdlogger_files_rotated_total`
-- `cmdlogger_metrics_scrapes_total`
-- `cmdlogger_streams_connected_total`
-- `cmdlogger_streams_disconnected_total`
-- `cmdlogger_stream_bytes_sent_total`
-- `cmdlogger_idle_alerts_total`
+- `cmdlogger_lines_total`, `cmdlogger_bytes_total`, `cmdlogger_files_rotated_total`,
+  `cmdlogger_metrics_scrapes_total`, `cmdlogger_streams_connected_total`,
+  `cmdlogger_streams_disconnected_total`, `cmdlogger_stream_bytes_sent_total`,
+  `cmdlogger_idle_alerts_total`
 
 Gauges:
-- `cmdlogger_current_file_bytes`
-- `cmdlogger_current_file_disk_bytes`
-- `cmdlogger_current_compression_ratio`
-- `cmdlogger_start_time_seconds`
-- `cmdlogger_uptime_seconds`
-- `cmdlogger_last_rotation_time_seconds`
-- `cmdlogger_last_write_time_seconds`
-- `cmdlogger_process_running{mode="cmd|stdin"}`
-- `cmdlogger_streams_current`
-- `cmdlogger_idle_active`
-- `cmdlogger_idle_threshold_seconds`
-- `cmdlogger_config_info{compress,retain,max_bytes,interval_seconds,echo,timestamp,ring_size}=1`
-- `cmdlogger_current_file_info{path="..."}=1`
-- `cmdlogger_metrics_bind_info{host,port}=1`
+- `cmdlogger_current_file_bytes`, `cmdlogger_current_file_disk_bytes`,
+  `cmdlogger_current_compression_ratio`, `cmdlogger_start_time_seconds`,
+  `cmdlogger_uptime_seconds`, `cmdlogger_last_rotation_time_seconds`,
+  `cmdlogger_last_write_time_seconds`, `cmdlogger_process_running{mode="cmd|stdin"}`,
+  `cmdlogger_streams_current`, `cmdlogger_idle_active`, `cmdlogger_idle_threshold_seconds`,
+  `cmdlogger_config_info{compress,retain,max_bytes,interval_seconds,echo,timestamp,ring_size}=1`,
+  `cmdlogger_current_file_info{path="..."}=1`,
+  `cmdlogger_metrics_bind_info{host,port}=1`
 
-Notes:
-- `current_file_disk_bytes` should reflect on-disk size of the active file. When `compress=inline`, compute compression ratio = uncompressed_bytes / max(disk_bytes, 1); otherwise 1.0.
-- Count **only payload bytes** for stream bytes (ignore SSE framing and heartbeats in the counter).
-- On rotation, reset per-current-file gauges as appropriate and update `last_rotation_time_seconds`.
+### Signals & shutdown
+Handle SIGINT/SIGTERM: if needed, finish pending rotation, close file, stop timers/threads, shut down HTTP, cleanup temp files.
 
-## HTTP details
-- Implement with `BaseHTTPRequestHandler` + `ThreadingMixIn` HTTPServer.
-- Normalize paths by stripping a trailing slash.
-- Accept `/rotate` via GET and POST; support `?soft=1` to schedule rotation at next line boundary (vs immediate “hard” rotate).
-- `/config` POST must parse JSON body and validate types. For `max_bytes` & `interval`, accept both numeric and “human” strings; apply changes immediately where possible. For options needing a new file (`out_dir`, `prefix`, `compress`), set `rotate_after_this_line = True` and also accept `"rotate_now": true` to rotate immediately.
-- `/stream` must:
-  - Replay the ring buffer (size configurable with `-R`).
-  - Then stream live lines using SSE (`data: ...` frames) with a heartbeat comment every ~10s; or raw text when `?raw=1`.
-  - Support multiple concurrent subscribers safely.
-  - Update stream metrics: connected/disconnected counters, current gauge, and bytes sent counter.
+### Implementation constraints
+- Python 3 stdlib only. Clear classes: RotatingWriter, IdleMonitor, _StreamHub, _Metrics, threaded HTTP server/handler.
+- Performance: no periodic polling for idle detection; rotation-by-interval may use a lightweight periodic thread (not blocking writes).
+- Thread safety: minimize contention; drop stream messages if subscriber queue is full.
 
-## Signals & shutdown
-- Handle SIGINT/SIGTERM: finish the current line, perform any pending rotation if needed, close current file (finalize), stop threads/timers, shut down HTTP server, exit 0.
-- Clean up any temp file created for inline bpftrace on exit.
+### Acceptance checks (examples)
+- `./cmd_logger.py -m -M :0 -n demo -z inline -s 5M -t 10m -r 5 -e -T -R 100 -c "yes hello"`
+  shows files rotating near 5M, endpoints working, `/rotate` returns previous/current paths.
+- Pipe mode: `yes data | ./cmd_logger.py -m -M :0` reads stdin (no default cmd).
+- Idle: `-I 5` emits `[IDLE for 5s]` once per idle period; metrics reflect state.
 
-## Implementation constraints
-- Python 3 stdlib only.
-- Performance: no periodic `time.sleep` polling for idle detection; use `threading.Timer`. For rotate-by-interval you may use a lightweight periodic thread but it must not block the write path.
-- Thread safety: protect shared state minimally. Avoid blocking writer on slow stream subscribers (use bounded queues and drop when full).
-- Code should be a single file, ~readable, with clear classes: `RotatingWriter`, `IdleMonitor`, `_StreamHub`, `_Metrics`, HTTP server (`_ThreadingHTTPServer`, handler).
-
-## Acceptance checks (examples)
-- Start with: `./cmd_logger.py -m -M :0 -n demo -z inline -s 5M -t 10m -r 5 -e -T -R 100 -c "yes hello"`
-  - See HTTP “listening at …” on stderr, and files appear in `.` with `.current.log.gz`, rotating at ~5M.
-  - `curl /metrics` shows gauges/counters updating; `curl -N /stream` shows live lines; connects/disconnects reflected.
-  - `curl -X POST /rotate` immediately closes current and opens a new current; response JSON returns previous/current file paths.
-  - `curl -X POST /config -d '{"compress":"after","prefix":"x","rotate_now":true}'` immediately rotates; next files reflect new settings.
-- Pipe mode: `yes data | ./cmd_logger.py -m -M :0` must not run the default command; must read stdin and log/stream lines.
-- Idle: `-I 5` must inject `[IDLE for 5s]` after 5s of inactivity, once per idle period, and set/reset idle metrics accordingly.
-
-Generate the full script now.
+END PROMPT
 """
 
 import argparse
@@ -198,6 +122,7 @@ import sys
 import tempfile
 import threading
 import time
+import glob
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -216,7 +141,7 @@ _MULT = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4, "P": 1024**
 _PID_TOKEN_RE = re.compile(r"PID:([A-Za-z0-9_.\-]+)")
 
 DEFAULT_CMD = "bpftrace BPFTRACE -p PID:pd-protod"
-DEFAULT_BPFTRACE = "@/usr/bin/replication_monitor.bt"
+DEFAULT_BPFTRACE = "/usr/bin/replication_monitor.bt"
 
 def parse_size_to_int(s: Optional[str]) -> Optional[int]:
     if s is None:
@@ -245,29 +170,12 @@ def parse_interval_to_secs(s: Optional[str]) -> Optional[int]:
     return {"s": val, "m": val * 60, "h": val * 3600, "d": val * 86400}[unit]
 
 def iso_now() -> str:
-    # ISO-8601 with timezone offset; e.g., 2025-11-11T09:42:17.123456-08:00
     return datetime.now(timezone.utc).astimezone().isoformat()
 
 def human_ts():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def load_bpftrace_spec(spec: str) -> str:
-    if spec.startswith("@"):
-        path = spec[1:]
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"--bpftrace file not found: {path}")
-        return os.path.abspath(path)
-    fd, tmp = tempfile.mkstemp(prefix="bpftrace_", suffix=".bt")
-    with os.fdopen(fd, "w") as f:
-        f.write(spec)
-    return tmp
-
-def replace_bpftrace_token(cmd_str: str, bpftrace_path: Optional[str]) -> str:
-    if bpftrace_path is None:
-        return cmd_str
-    return cmd_str.replace("BPFTRACE", shlex.quote(bpftrace_path))
-
-def pidof_one(procname: str) -> Optional[str]:
+def pidof_one(procname:: str) -> Optional[str]:
     try:
         out = check_output(["pidof", "-s", procname], text=True).strip()
         return out if out else None
@@ -284,12 +192,82 @@ def replace_pid_tokens(cmd_str: str) -> str:
         return pid
     return _PID_TOKEN_RE.sub(_sub, cmd_str)
 
+# ---------- BPFTRACE resolution (single flag supports file|glob|inline) ----------
+
+def _materialize_inline_bt(text: str) -> str:
+    fd, tmp = tempfile.mkstemp(prefix="bpftrace_", suffix=".bt")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+        if not text.endswith("\n"):
+            f.write("\n")
+    return tmp
+
+def _resolve_bpftrace_mixed(specs: List[str]) -> Tuple[str, List[str]]:
+    """
+    Each spec can be: glob pattern, file path, or inline. `inline:...` forces inline.
+    Returns (combined_file_path, temp_files_to_cleanup).
+    """
+    # If user passed any -b, keep them as-is; else use default
+    use_specs = specs if specs else [DEFAULT_BPFTRACE]
+
+    files: List[str] = []
+    cleanup: List[str] = []
+
+    for s in use_specs:
+        if s.startswith("inline:"):
+            text = s[len("inline:"):]
+            p = _materialize_inline_bt(text)
+            cleanup.append(p)
+            files.append(p)
+            continue
+
+        matches = sorted(glob.glob(s))
+        if matches:
+            for m in matches:
+                if os.path.isfile(m):
+                    files.append(os.path.abspath(m))
+            continue
+
+        if os.path.isfile(s):
+            files.append(os.path.abspath(s))
+            continue
+
+        # Fallback to inline
+        p = _materialize_inline_bt(s)
+        cleanup.append(p)
+        files.append(p)
+
+    if not files:
+        p = os.path.abspath(DEFAULT_BPFTRACE)
+        if not os.path.isfile(p):
+            raise FileNotFoundError(f"Default BPFTrace file not found: {p}")
+        files.append(p)
+
+    # Concatenate in order
+    fd, combined_path = tempfile.mkstemp(prefix="bpftrace_combined_", suffix=".bt")
+    with os.fdopen(fd, "w") as out:
+        out.write("// ---- Combined BPFTrace program (auto-generated) ----\n")
+        for i, fp in enumerate(files, 1):
+            out.write(f"// [{i}] {fp}\n")
+        out.write("// -------------------------------------------------\n\n")
+        for i, fp in enumerate(files, 1):
+            out.write(f"// ---- BEGIN [{i}] {fp} ----\n")
+            with open(fp, "r") as src:
+                out.write(src.read())
+            out.write("\n// ---- END ----\n\n")
+    cleanup.append(combined_path)
+    return combined_path, cleanup
+
+def replace_bpftrace_token(cmd_str: str, bpftrace_path: Optional[str]) -> str:
+    if bpftrace_path is None:
+        return cmd_str
+    return cmd_str.replace("BPFTRACE", shlex.quote(bpftrace_path))
+
 # ---------- Streaming hub (ring buffer + fan-out) ----------
 
 class _StreamHub:
-    """Fan-out lines to multiple subscribers with an in-memory ring buffer."""
     def __init__(self, ring_size: int = 25):
-        self._subs = set()      # set[Queue[str]]
+        self._subs = set()
         self._lock = threading.Lock()
         self._ring = deque(maxlen=max(1, ring_size))
 
@@ -304,7 +282,7 @@ class _StreamHub:
             return list(self._ring)
 
     def subscribe(self) -> Queue:
-        q = Queue(maxsize=1000)  # per-subscriber buffer
+        q = Queue(maxsize=1000)
         with self._lock:
             self._subs.add(q)
         return q
@@ -330,31 +308,25 @@ STREAM_HUB = _StreamHub()
 class _Metrics:
     def __init__(self):
         self._lock = threading.RLock()
-        # counters / gauges
         self.lines_total = 0
         self.bytes_total = 0
         self.files_rotated_total = 0
         self.current_file_bytes = 0
         self.start_time = time.time()
         self.last_rotation_time = 0.0
-        self.mode = "unknown"  # "cmd" | "stdin"
+        self.mode = "unknown"
         self.process_running = 0
-        # write/scrape
         self.last_write_time = 0.0
         self.scrapes_total = 0
-        # disk/compression
         self.current_file_disk_bytes = 0
         self.current_compression_ratio = 1.0
-        # stream stats
         self.streams_connected_total = 0
         self.streams_disconnected_total = 0
         self.stream_bytes_sent_total = 0
         self.streams_current = 0
-        # idle stats
         self.idle_alerts_total = 0
         self.idle_threshold_seconds = 0.0
-        self.idle_active = 0  # 0/1
-        # info
+        self.idle_active = 0
         self.config = {
             "compress": "none",
             "retain": "0",
@@ -367,12 +339,10 @@ class _Metrics:
         self.current_file_path = ""
         self.metrics_bind = ("", 0)
 
-    # lock helpers
     def _with(self, fn):
         with self._lock:
             fn(self)
 
-    # setters
     def set_mode(self, mode: str):                     self._with(lambda s: setattr(s, "mode", mode))
     def set_running(self, running: bool):              self._with(lambda s: setattr(s, "process_running", 1 if running else 0))
     def incr_lines(self, n: int = 1):                  self._with(lambda s: setattr(s, "lines_total", s.lines_total + n))
@@ -398,7 +368,6 @@ class _Metrics:
             now = time.time()
             host, port = self.metrics_bind
             L = []
-            # counters
             L += [
                 "# TYPE cmdlogger_lines_total counter",
                 f"cmdlogger_lines_total {self.lines_total}",
@@ -417,7 +386,6 @@ class _Metrics:
                 "# TYPE cmdlogger_idle_alerts_total counter",
                 f"cmdlogger_idle_alerts_total {self.idle_alerts_total}",
             ]
-            # gauges
             L += [
                 "# TYPE cmdlogger_current_file_bytes gauge",
                 f"cmdlogger_current_file_bytes {self.current_file_bytes}",
@@ -442,7 +410,6 @@ class _Metrics:
                 "# TYPE cmdlogger_idle_threshold_seconds gauge",
                 f"cmdlogger_idle_threshold_seconds {self.idle_threshold_seconds}",
             ]
-            # info
             cfg_lbls = ",".join([f'{k}="{v}"' for k, v in sorted(self.config.items())])
             L += [
                 "# TYPE cmdlogger_config_info gauge",
@@ -465,7 +432,6 @@ METRICS = _Metrics()
 # ---------- Idle monitor (no polling) ----------
 
 class IdleMonitor:
-    """Re-armable one-shot timer for idle detection; no polling/sleep."""
     def __init__(self, writer, runtime_cfg):
         self.writer = writer
         self.runtime_cfg = runtime_cfg
@@ -482,7 +448,6 @@ class IdleMonitor:
             t.cancel()
 
     def _fire(self):
-        # runs on timer thread
         try:
             now = time.monotonic()
             since = int(now - self._last_write)
@@ -492,7 +457,6 @@ class IdleMonitor:
             msg = f"[IDLE for {since}s]\n"
             self.writer.begin_line()
             self.writer.write_line(msg.encode("utf-8"))
-            # do not rearm here; next poke() will do it
         finally:
             pass
 
@@ -504,7 +468,6 @@ class IdleMonitor:
             self._timer.start()
 
     def poke(self):
-        """Call on each successful write to reset idle timer."""
         with self._lock:
             self._last_write = time.monotonic()
             self._arm_locked()
@@ -512,7 +475,6 @@ class IdleMonitor:
                 METRICS.idle_reset()
 
     def arm(self, threshold_secs: float):
-        """Set/change idle threshold (0 disables)."""
         with self._lock:
             self._threshold = float(threshold_secs or 0)
             METRICS.set_idle_threshold(self._threshold)
@@ -524,10 +486,14 @@ class IdleMonitor:
 
 # ---------- HTTP server & handlers ----------
 
+def _norm_path(path: str) -> str:
+    p = path.rstrip("/")
+    return p if p else "/"
+
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
+        path = _norm_path(parsed.path)
         qs = parse_qs(parsed.query)
 
         if path == "/metrics":
@@ -550,14 +516,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/rotate":
-            soft = qs.get("soft", ["0"])[0] not in ("0","false","no")
-            ok, msg, prev_file, new_current = self.server.rotate_now(soft=soft)
-            body = json.dumps({
-                "ok": ok,
-                "message": msg,
-                "previous_file": prev_file,
-                "current_file": new_current
-            }).encode("utf-8")
+            soft = qs.get("soft", ["0"])[0] in ("1", "true", "yes")
+            ok, msg, prev_file, new_file = self.server.rotate_now(soft=soft)
+            body = json.dumps({"ok": ok, "message": msg, "previous_file": prev_file, "current_file": new_file}).encode("utf-8")
             self._ok(b"application/json", body, code=200 if ok else 500)
             return
 
@@ -565,16 +526,21 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        path = parsed.path
+        path = _norm_path(parsed.path)
+        qs = parse_qs(parsed.query)
 
         if path == "/rotate":
-            ok, msg, current = self.server.rotate_now()
-            body = json.dumps({"ok": ok, "message": msg, "current_file": current}).encode("utf-8")
+            soft = qs.get("soft", ["0"])[0] in ("1", "true", "yes")
+            ok, msg, prev_file, new_file = self.server.rotate_now(soft=soft)
+            body = json.dumps({"ok": ok, "message": msg, "previous_file": prev_file, "current_file": new_file}).encode("utf-8")
             self._ok(b"application/json", body, code=200 if ok else 500)
             return
 
         if path == "/config":
-            self._config_post()
+            payload = self._read_json()
+            ok, msg, updated = self.server.apply_config(payload)
+            body = json.dumps({"ok": ok, "message": msg, "updated": updated}, indent=2).encode("utf-8")
+            self._ok(b"application/json", body, code=200 if ok else 400)
             return
 
         self._not_found()
@@ -604,14 +570,7 @@ class _Handler(BaseHTTPRequestHandler):
         body = json.dumps(state, indent=2, sort_keys=True).encode("utf-8")
         self._ok(b"application/json", body)
 
-    def _config_post(self):
-        payload = self._read_json()
-        ok, msg, updated = self.server.apply_config(payload)
-        body = json.dumps({"ok": ok, "message": msg, "updated": updated}, indent=2).encode("utf-8")
-        self._ok(b"application/json", body, code=200 if ok else 400)
-
     def _stream(self, raw: bool):
-        # start response
         if raw:
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -629,7 +588,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         METRICS.stream_connected()
         try:
-            # replay ring
+            # replay
             snapshot = STREAM_HUB.snapshot()
             for line in snapshot:
                 payload = line.encode("utf-8", errors="replace")
@@ -687,22 +646,23 @@ class _Handler(BaseHTTPRequestHandler):
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
-    # The server holds references to the writer and runtime config
     def configure(self, writer, runtime_cfg):
         self.writer = writer
         self.runtime_cfg = runtime_cfg
 
-    def rotate_now(self):
+    def rotate_now(self, soft: bool = False):
         try:
-            # rotate immediately (between lines is OK here; we call writer.rotate directly)
-            self.writer.rotate()
-            current = str(self.writer.current_path)
-            return True, "rotated", current
+            if soft:
+                self.writer.rotate_after_this_line = True
+                return True, "scheduled", None, str(self.writer.current_path)
+            prev_current = str(self.writer.current_path) if self.writer.current_path else None
+            self.writer.rotate()  # immediate: close old, open new
+            return True, "rotated", prev_current, str(self.writer.current_path)
         except Exception as e:
-            return False, f"rotate failed: {e}", None
+            return False, f"rotate failed: {e}", None, None
 
     def get_config_state(self) -> Dict[str, Any]:
-        st = dict(self.runtime_cfg)  # copy
+        st = dict(self.runtime_cfg)
         st.update({
             "current_file": str(self.writer.current_path) if self.writer.current_path else "",
             "bytes_written_uncompressed": self.writer.bytes_written_uncompressed,
@@ -712,21 +672,18 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     def apply_config(self, payload: Dict[str, Any]):
         updated = {}
         try:
-            # echo
             if "echo" in payload:
                 self.writer.echo = bool(payload["echo"])
                 self.runtime_cfg["echo"] = self.writer.echo
                 updated["echo"] = self.writer.echo
                 METRICS.set_config(echo=self.writer.echo)
 
-            # timestamp
             if "timestamp" in payload:
                 self.writer.timestamp_flag = bool(payload["timestamp"])
                 self.runtime_cfg["timestamp"] = self.writer.timestamp_flag
                 updated["timestamp"] = self.writer.timestamp_flag
                 METRICS.set_config(timestamp=self.writer.timestamp_flag)
 
-            # ring size
             if "ring_size" in payload:
                 rn = int(payload["ring_size"])
                 STREAM_HUB.set_ring_size(rn)
@@ -734,36 +691,32 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
                 updated["ring_size"] = rn
                 METRICS.set_config(ring_size=rn)
 
-            # idle alert
             if "idle_alert_secs" in payload:
                 v = float(payload["idle_alert_secs"])
                 self.runtime_cfg["idle_alert_secs"] = v
                 updated["idle_alert_secs"] = v
                 METRICS.set_idle_threshold(v)
-                self.writer.idle_monitor.arm(v)
+                if hasattr(self.writer, "idle_monitor") and self.writer.idle_monitor:
+                    self.writer.idle_monitor.arm(v)
 
-            # retain
             if "retain" in payload:
                 self.writer.retain = max(0, int(payload["retain"]))
                 self.runtime_cfg["retain"] = self.writer.retain
                 updated["retain"] = self.writer.retain
                 METRICS.set_config(retain=self.writer.retain)
 
-            # max bytes
             if "max_bytes" in payload:
                 self.writer.max_bytes = parse_size_to_int(payload["max_bytes"])
                 self.runtime_cfg["max_bytes"] = self.writer.max_bytes or 0
                 updated["max_bytes"] = self.writer.max_bytes
                 METRICS.set_config(max_bytes=self.writer.max_bytes or 0)
 
-            # interval
             if "interval" in payload:
                 self.writer.interval_s = parse_interval_to_secs(payload["interval"])
                 self.runtime_cfg["interval_seconds"] = self.writer.interval_s or 0
                 updated["interval_seconds"] = self.writer.interval_s or 0
                 METRICS.set_config(interval_seconds=self.writer.interval_s or 0)
 
-            # prefix/out_dir/compress need a new file to take effect
             needs_rotation = False
 
             if "prefix" in payload:
@@ -790,7 +743,6 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
                 METRICS.set_config(compress=cv)
                 needs_rotation = True
 
-            # optional force immediate rotation via body flag
             if payload.get("rotate_now") or needs_rotation:
                 self.writer.rotate_after_this_line = True
 
@@ -799,15 +751,14 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
             return False, str(e), updated
 
 def _parse_bind(bind: str) -> Tuple[str, int]:
-    host, port = ("0.0.0.0", 9108)
     s = bind.strip()
     if not s:
-        return host, port
+        return "0.0.0.0", 9108
     if ":" in s:
-        host_part, port_part = s.rsplit(":", 1)
-        host_part = host_part or "0.0.0.0"
-        port = int(port_part) if port_part else 0
-        return host_part, port
+        host, port_s = s.rsplit(":", 1)
+        host = host or "0.0.0.0"
+        port = int(port_s) if port_s else 0
+        return host, port
     try:
         port = int(s)
         return "0.0.0.0", port
@@ -887,7 +838,7 @@ class RotatingWriter:
                            max_bytes=self.max_bytes or 0, interval_seconds=self.interval_s or 0,
                            echo=self.echo, timestamp=self.timestamp_flag)
 
-        # Idle monitor will be attached externally: writer.idle_monitor = IdleMonitor(...)
+        # `idle_monitor` will be attached from run().
 
     def _make_current_path(self) -> Path:
         ext = ".log.gz" if self.compress == "inline" else ".log"
@@ -937,6 +888,7 @@ class RotatingWriter:
 
     def rotate(self):
         if not self.current_fp:
+            self.open_new()
             return
         old_fp = self.current_fp
         old_path = self.current_path
@@ -1011,8 +963,6 @@ class RotatingWriter:
         if not self.timestamp_flag:
             return line
         ts = iso_now() + " "
-        if line.endswith(b"\n"):
-            return ts.encode("utf-8") + line
         return ts.encode("utf-8") + line
 
     def write_line(self, line: bytes):
@@ -1040,11 +990,9 @@ class RotatingWriter:
         now = time.time()
         METRICS.set_last_write_time(now)
 
-        # idle timer: re-arm without sleeping
         if hasattr(self, "idle_monitor") and self.idle_monitor:
             self.idle_monitor.poke()
 
-        # publish to stream
         try:
             text = line.decode("utf-8", errors="replace")
         except Exception:
@@ -1112,22 +1060,23 @@ def run():
     ap = argparse.ArgumentParser(description="Capture stdout or stdin to rolling log files (rotate only on line breaks).")
     ap.add_argument("-c", "--cmd", default=DEFAULT_CMD,
                     help=f'Command to run (default: "{DEFAULT_CMD}").')
-    ap.add_argument("-b", "--bpftrace", default=DEFAULT_BPFTRACE,
-                    help=f"BPFTrace program (inline or @path). Default: {DEFAULT_BPFTRACE}")
+    ap.add_argument("-b", "--bpftrace", action="append", default=[],
+                    help=("BPFTrace source spec (repeatable). Each item may be a file path, a glob pattern, "
+                          "or inline code. Use 'inline:...' to force inline if a same-named file exists. "
+                          f"Default when omitted: {DEFAULT_BPFTRACE}"))
     ap.add_argument("-o", "--out-dir", default=".", help="Directory for logs.")
     ap.add_argument("-n", "--prefix", default="capture", help="Log filename prefix.")
     ap.add_argument("-s", "--max-bytes", type=parse_size_to_int, help="Rotate after this many bytes (e.g., 100M).")
     ap.add_argument("-t", "--interval", type=parse_interval_to_secs, help="Rotate after this much time (e.g., 10m).")
-    ap.add_argument("-z", "--compress", choices=["none", "inline", "after"], default="inline", help="Compression mode.")
+    ap.add_argument("-z", "--compress", choices=["none", "inline", "after"], default="none", help="Compression mode.")
     ap.add_argument("-r", "--retain", type=int, default=10, help="Keep newest N rotated logs.")
     ap.add_argument("-u", "--flush-interval", type=float, default=0.0, help="Extra flush cadence in seconds (0 disables).")
-    ap.add_argument("-v", "--env", action="append", default=['BPFTRACE_STRLEN=200'], help="Env var KEY=VALUE to add (can repeat).")
+    ap.add_argument("-v", "--env", action="append", default=[], help="Env var KEY=VALUE to add (can repeat).")
     ap.add_argument("-w", "--cwd", default=None, help="Working directory for the command.")
     ap.add_argument("-e", "--echo", action="store_true", help="Echo each line to stdout in addition to writing to the log.")
     ap.add_argument("-T", "--timestamp", action="store_true", help="Prefix each output line with an ISO-8601 timestamp.")
     ap.add_argument("-I", "--idle-alert", type=float, default=0.0,
                     help="If no input arrives for this many seconds, inject an [IDLE for Ns] line (0 to disable).")
-    # HTTP / streaming
     ap.add_argument("-m", "--metrics", action="store_true",
                     help="Serve HTTP: /metrics, /healthz, /stream, /rotate, /config.")
     ap.add_argument("-M", "--metrics-bind", default="0.0.0.0:9108",
@@ -1138,7 +1087,6 @@ def run():
 
     out_dir = Path(args.out_dir).resolve()
 
-    # ring size
     STREAM_HUB.set_ring_size(args.ring_size)
     METRICS.set_config(ring_size=args.ring_size)
 
@@ -1149,7 +1097,6 @@ def run():
         cmd_str = ""
         sys.stderr.write(f"[{human_ts()}] Detected piped stdin; ignoring default command.\n")
 
-    # Build env
     env = os.environ.copy()
     for kv in args.env:
         if "=" not in kv:
@@ -1157,7 +1104,6 @@ def run():
         k, v = kv.split("=", 1)
         env[k] = v
 
-    # Writer & runtime config
     writer = RotatingWriter(out_dir=out_dir, prefix=args.prefix, compress=args.compress,
                             retain=args.retain, time_fmt="%Y%m%d-%H%M%S",
                             max_bytes=args.max_bytes, interval_s=args.interval,
@@ -1177,52 +1123,24 @@ def run():
         "idle_alert_secs": float(args.idle_alert or 0),
     }
 
-    # Idle monitor (attach to writer so write_line can poke)
     idle_monitor = IdleMonitor(writer, runtime_cfg)
     writer.idle_monitor = idle_monitor
     idle_monitor.arm(runtime_cfg["idle_alert_secs"])
 
-    # HTTP server (start early)
     srv = None
     if args.metrics:
         srv = _start_server(args.metrics_bind, writer, runtime_cfg)
 
-    # Determine input mode
     METRICS.set_mode("cmd" if cmd_str else "stdin")
     METRICS.set_running(True)
 
-    def shutdown(sig, frame):
-        try:
-            if writer.rotate_after_this_line:
-                writer.rotate()
-            writer.close_current(True)
-        finally:
-            idle_monitor.stop()
-            writer.stop()
-            METRICS.set_running(False)
-            if srv:
-                try:
-                    srv.shutdown()
-                except Exception:
-                    pass
-            sys.exit(0)
-
-    for s in (signal.SIGINT, signal.SIGTERM):
-        try:
-            signal.signal(s, shutdown)
-        except Exception:
-            pass
-
-    tmp_files = []
+    tmp_files: List[str] = []
     try:
         if cmd_str:
-            # prepare BPFTRACE spec
-            bt_spec = args.bpftrace if args.bpftrace is not None else DEFAULT_BPFTRACE
-            bt_path = load_bpftrace_spec(bt_spec)
-            if not bt_spec.startswith("@"):
-                tmp_files.append(bt_path)
-
-            cmd_str = replace_bpftrace_token(cmd_str, bt_path)
+            bt_specs = args.bpftrace if args.bpftrace else [DEFAULT_BPFTRACE]
+            combined_bt, cleanup_bt = _resolve_bpftrace_mixed(bt_specs)
+            tmp_files.extend(cleanup_bt)
+            cmd_str = replace_bpftrace_token(cmd_str, combined_bt)
             cmd_str = replace_pid_tokens(cmd_str)
 
             cmd_argv = shlex.split(cmd_str)
